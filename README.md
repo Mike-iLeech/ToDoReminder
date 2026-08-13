@@ -1,7 +1,7 @@
 # ToDo Reminder
 
 ![Версия](https://img.shields.io/badge/version-2.5.0-blue)
-![Лицензия](https://img.shields.io/badge/license-MIT-green)
+![Лицензия](https://img.shields.io/badge/license-All%20rights%20reserved-red)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)
 
@@ -88,7 +88,12 @@ tests/run_tests.py      60 автотестов
 
 ## Лицензия
 
-MIT — см. файл [LICENSE](LICENSE).
+**All rights reserved** — проприетарная лицензия.
+
+Это программное обеспечение и все его компоненты являются интеллектуальной
+собственностью автора (iLeech). Использование, копирование, распространение,
+изменение или присвоение авторства без письменного разрешения запрещены.
+Полный текст — см. файл [LICENSE](LICENSE).
 
 ---
 Полный список изменений: [CHANGELOG.md](CHANGELOG.md).
