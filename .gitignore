@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Сборка / артефакты
+build/
+dist/
+*.spec
+*.log
+
+# Данные приложения (портятся локально, на GitHub не нужны)
+data/
+
+# Редакторы / ОС
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Темповые
+/tmp/
+*.tmp
