@@ -1,7 +1,7 @@
 # ToDo Reminder
 
 ![Версия](https://img.shields.io/badge/version-2.5.0-blue)
-![Лицензия](https://img.shields.io/badge/license-All%20rights%20reserved-red)
+![Лицензия](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)
 
@@ -88,12 +88,9 @@ tests/run_tests.py      60 автотестов
 
 ## Лицензия
 
-**All rights reserved** — проприетарная лицензия.
-
-Это программное обеспечение и все его компоненты являются интеллектуальной
-собственностью автора (iLeech). Использование, копирование, распространение,
-изменение или присвоение авторства без письменного разрешения запрещены.
-Полный текст — см. файл [LICENSE](LICENSE).
+Проект распространяется под **GNU General Public License v3.0 (GPLv3)** — свободная
+лицензия: можно использовать, изменять и распространять, сохраняя авторство и ту же
+лицензию на производные работы. Полный текст — см. файл [LICENSE](LICENSE).
 
 ---
 Полный список изменений: [CHANGELOG.md](CHANGELOG.md).
