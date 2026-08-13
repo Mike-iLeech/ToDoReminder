@@ -507,14 +507,21 @@ class MainWindow(QWidget):
         dlg.show()
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "О программе",
+        box = QMessageBox(self)
+        box.setWindowTitle("О программе")
+        box.setIcon(QMessageBox.Information)
+        box.setTextFormat(Qt.RichText)
+        box.setText(
             f"<b>{APP_NAME}</b><br>Версия {APP_VERSION} ({APP_RELEASE_DATE}).<br><br>"
             "Это приложение сделал iLeech для своей любимой Twiggi Light.<br>"
             "Я потратил на эту приложуху все токены, которые у меня были, "
-            "и сделал бы это для тебя еще тысячу раз не задумываясь ни на секунду &lt;3",
+            "и сделал бы это для тебя еще тысячу раз не задумываясь ни на секунду &lt;3<br><br>"
+            '<a href="https://github.com/mixanizmus1993-debug/ToDoReminder">Проект на GitHub</a>'
         )
+        for label in box.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+            label.setTextFormat(Qt.RichText)
+        box.exec()
 
     # ------------------------------------------------------------------ окно
 
