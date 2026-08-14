@@ -90,7 +90,7 @@ docs/                   документация проекта (техниче�
 ## Документация
 
 - **Техническое задание**, по которому разрабатывалось приложение: [docs/Technical_Specification.md](docs/Technical_Specification.md)
-- Wiki проекта: [github.com/mixanizmus1993-debug/ToDoReminder/wiki](https://github.com/mixanizmus1993-debug/ToDoReminder/wiki)
+- Wiki проекта: [github.com/Mike-iLeech/ToDoReminder/wiki](https://github.com/Mike-iLeech/ToDoReminder/wiki)
 
 ## Лицензия
 
