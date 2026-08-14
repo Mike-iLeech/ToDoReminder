@@ -84,7 +84,13 @@ autostart.py, storage.py  автозапуск и хранилище
 version.py              версия приложения
 resources/icon.ico      иконка
 tests/run_tests.py      60 автотестов
+docs/                   документация проекта (техническое задание)
 ```
+
+## Документация
+
+- **Техническое задание**, по которому разрабатывалось приложение: [docs/Technical_Specification.md](docs/Technical_Specification.md)
+- Wiki проекта: [github.com/mixanizmus1993-debug/ToDoReminder/wiki](https://github.com/mixanizmus1993-debug/ToDoReminder/wiki)
 
 ## Лицензия
 
