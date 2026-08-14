@@ -1,5 +1,7 @@
 # ToDo Reminder
 
+> **English:** [README.en.md](README.en.md)
+
 ![Версия](https://img.shields.io/badge/version-2.5.0-blue)
 ![Лицензия](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
