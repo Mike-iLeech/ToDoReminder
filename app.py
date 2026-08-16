@@ -155,19 +155,28 @@ class AppContext:
         self._daily_check()
 
     def _daily_check(self) -> None:
-        """Новое календарное число → статусы регулярных задач сбрасываются в To Do."""
+        """Новое календарное число → статусы регулярных задач сбрасываются в To Do, Done удаляются."""
         today = date.today().isoformat()
         stored = self.settings_manager.s.regular_reset_date
         if stored == today:
             return
         changed = self.store.reset_regular_to_todo()
+        removed = self.store.remove_done()
         self.settings_manager.s.regular_reset_date = today
         self.settings_manager.save()
-        if changed:
+        if changed or removed:
             self.save_data()
             if self.main_window is not None:
                 self.main_window.refresh()
         self.show_list_win = None
+
+    def _startup_cleanup(self) -> None:
+        """При запуске приложения удаляет все Done-задачи."""
+        removed = self.store.remove_done()
+        if removed:
+            self.save_data()
+            if self.main_window is not None:
+                self.main_window.refresh()
 
     def _load_tasks(self) -> None:
         self.store.load_dict(self.task_file.load({}))
@@ -256,6 +265,8 @@ def run(argv=None) -> None:
     app.installEventFilter(app._titlebar_filter)
 
     ctx = AppContext(app)
+
+    ctx._startup_cleanup()
 
     main_window = MainWindow(ctx)
     ctx.main_window = main_window

@@ -237,6 +237,15 @@ class TaskStore:
         self.tasks = urgent_active + other_active + done
         self.rebuild_orders()
 
+    def remove_done(self) -> int:
+        """Удаляет все задачи со статусом Done. Возвращает количество удалённых."""
+        before = len(self.tasks)
+        self.tasks = [t for t in self.tasks if t.status is not TaskStatus.DONE]
+        removed = before - len(self.tasks)
+        if removed:
+            self.rebuild_orders()
+        return removed
+
     def reset_regular_to_todo(self) -> bool:
         """Сбрасывает статус регулярных задач на To Do и поднимает их в самый верх списка."""
         reset_tasks = []
