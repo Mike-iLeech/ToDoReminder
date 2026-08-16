@@ -48,6 +48,7 @@ class Settings:
     fullscreen_min_font_size: int = 14          # минимальный размер шрифта при адаптации в полноэкранном окне
     fullscreen_columns_todo: int = 2            # число колонок для задач To Do в полноэкранном уведомлении
     fullscreen_columns_started: int = 2         # число колонок для задач Started в полноэкранном уведомлении
+    fullscreen_columns_done: int = 2            # число колонок для задач Done в полноэкранном уведомлении
 
 
 class SettingsManager(QObject):

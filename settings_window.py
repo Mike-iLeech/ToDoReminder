@@ -78,6 +78,13 @@ class SettingsDialog(QDialog):
         self.cols_started_spin.valueChanged.connect(self._on_cols_started)
         form.addRow("Колонки Started", self.cols_started_spin)
 
+        self.cols_done_spin = QSpinBox()
+        self.cols_done_spin.setRange(1, 8)
+        self.cols_done_spin.setValue(self.s.fullscreen_columns_done)
+        self.cols_done_spin.valueChanged.connect(self._on_cols_done)
+        form.addRow("Колонки Done", self.cols_done_spin)
+        self._sync_done_cols_visibility()
+
         # монитор
         self.monitor_combo = QComboBox()
         self._monitor_items = []  # (index, screen_name or None for primary)
@@ -259,6 +266,7 @@ class SettingsDialog(QDialog):
 
     def _on_done(self, index: int) -> None:
         self.s.show_done_in_fullscreen = index == 1
+        self._sync_done_cols_visibility()
         self.sm.save()
 
     def _on_cols_todo(self, value: int) -> None:
@@ -268,6 +276,14 @@ class SettingsDialog(QDialog):
     def _on_cols_started(self, value: int) -> None:
         self.s.fullscreen_columns_started = value
         self.sm.save()
+
+    def _on_cols_done(self, value: int) -> None:
+        self.s.fullscreen_columns_done = value
+        self.sm.save()
+
+    def _sync_done_cols_visibility(self) -> None:
+        visible = self.done_combo.currentIndex() == 1
+        self.cols_done_spin.setVisible(visible)
 
     def _on_monitor(self, index: int) -> None:
         name = self._monitor_items[index] if 0 <= index < len(self._monitor_items) else None
@@ -375,6 +391,7 @@ class SettingsDialog(QDialog):
             self.done_combo,
             self.cols_todo_spin,
             self.cols_started_spin,
+            self.cols_done_spin,
             self.monitor_combo,
             self.size_spin,
             self.font_combo,
@@ -393,6 +410,8 @@ class SettingsDialog(QDialog):
             self.done_combo.setCurrentIndex(1 if s.show_done_in_fullscreen else 0)
             self.cols_todo_spin.setValue(s.fullscreen_columns_todo)
             self.cols_started_spin.setValue(s.fullscreen_columns_started)
+            self.cols_done_spin.setValue(s.fullscreen_columns_done)
+            self._sync_done_cols_visibility()
             self._select_monitor(s.monitor_name)
             self.size_spin.setValue(s.text_size)
             idx = self.font_combo.findText(s.font_family)

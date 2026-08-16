@@ -226,6 +226,7 @@ class ReminderWindow(QWidget):
         columns: list[list[Task]] = []
         n_todo_cols = max(1, getattr(s, "fullscreen_columns_todo", 2))
         n_started_cols = max(1, getattr(s, "fullscreen_columns_started", 2))
+        n_done_cols = max(1, getattr(s, "fullscreen_columns_done", 2))
         for col in self._distribute_round_robin(todo_tasks, n_todo_cols):
             columns.append(col)
         for col in self._distribute_round_robin(started_tasks, n_started_cols):
@@ -233,7 +234,7 @@ class ReminderWindow(QWidget):
 
         show_done = s.show_done_in_fullscreen and len(done_tasks) > 0
         if show_done:
-            for col in self._distribute_round_robin(done_tasks, n_todo_cols):
+            for col in self._distribute_round_robin(done_tasks, n_done_cols):
                 columns.append(col)
 
         shown_total = sum(len(c) for c in columns)
