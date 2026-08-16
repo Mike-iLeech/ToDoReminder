@@ -24,22 +24,23 @@ def preview_tasks() -> list:
     односложные слова, длинные слова, цифры и даты.
     """
     samples = [
-        ("Выпить кофе", TaskStatus.TO_DO),
-        ("Купить продукты", TaskStatus.TO_DO),
-        ("Хлеб, сок, чай, суп", TaskStatus.TO_DO),
-        ("Бег\nСон\nДуш", TaskStatus.TO_DO),
-        ("Подготовиться к экзамену\nПовторить интегралы и производные\nРешить 20 задач", TaskStatus.STARTED),
-        ("Сдать отчёт до 01.09.2026", TaskStatus.STARTED),
-        ("Изучить электроэнцефалографию", TaskStatus.STARTED),
-        ("Пройти высококвалифицированное переосвидетельствование", TaskStatus.STARTED),
-        ("Написать курсовую работу по истории информатики и подготовить презентацию на двадцать слайдов с иллюстрациями, диаграммами и примерами кода", TaskStatus.DONE),
-        ("Сделать зарядку\nПрогулка на свежем воздухе\nМедитация 10 минут", TaskStatus.DONE),
-        ("Дочитать главу", TaskStatus.DONE),
+        ("Выпить кофе", TaskStatus.TO_DO, False),
+        ("Купить продукты", TaskStatus.TO_DO, True),
+        ("Хлеб, сок, чай, суп", TaskStatus.TO_DO, False),
+        ("Бег\nСон\nДуш", TaskStatus.TO_DO, False),
+        ("Подготовиться к экзамену\nПовторить интегралы и производные\nРешить 20 задач", TaskStatus.STARTED, True),
+        ("Сдать отчёт до 01.09.2026", TaskStatus.STARTED, False),
+        ("Изучить электроэнцефалографию", TaskStatus.STARTED, False),
+        ("Пройти высококвалифицированное переосвидетельствование", TaskStatus.STARTED, False),
+        ("Написать курсовую работу по истории информатики и подготовить презентацию на двадцать слайдов с иллюстрациями, диаграммами и примерами кода", TaskStatus.DONE, True),
+        ("Сделать зарядку\nПрогулка на свежем воздухе\nМедитация 10 минут", TaskStatus.DONE, False),
+        ("Дочитать главу", TaskStatus.DONE, False),
     ]
     result = []
-    for title, status in samples:
+    for title, status, urgent in samples:
         task = Task.create(title)
         task.status = status
+        task.urgent = urgent
         result.append(task)
     return result
 

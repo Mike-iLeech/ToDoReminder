@@ -122,6 +122,26 @@ class SettingsDialog(QDialog):
         self.started_color_row = self._color_row(form, "Цвет статуса Started", "color_status_started", self.s.color_status_started, self._on_started_color)
         self.done_color_row = self._color_row(form, "Цвет статуса Done", "color_status_done", self.s.color_status_done, self._on_done_color)
 
+        # срочные дела в полноэкранном уведомлении
+        urgent_label = QLabel("Срочные дела (полноэкранное)")
+        urgent_label.setStyleSheet("font-weight: bold;")
+        form.addRow(urgent_label)
+
+        self.urgent_size_spin = QSpinBox()
+        self.urgent_size_spin.setRange(0, 30)
+        self.urgent_size_spin.setSuffix(" px")
+        self.urgent_size_spin.setValue(self.s.urgent_fullscreen_size_delta)
+        self.urgent_size_spin.valueChanged.connect(self._on_urgent_size)
+        form.addRow("Увеличение размера шрифта", self.urgent_size_spin)
+
+        self.urgent_color_row = self._color_row(form, "Цвет срочных дел", "urgent_fullscreen_color", self.s.urgent_fullscreen_color, self._on_urgent_color)
+
+        self.urgent_style_combo = QComboBox()
+        self.urgent_style_combo.addItems(["Обычный", "Жирный", "Курсив", "Жирный курсив"])
+        self.urgent_style_combo.setCurrentIndex(self.s.urgent_fullscreen_style_index)
+        self.urgent_style_combo.currentIndexChanged.connect(self._on_urgent_style)
+        form.addRow("Начертание срочных дел", self.urgent_style_combo)
+
         # прозрачность 0–100%
         opacity_box = QWidget()
         opacity_lay = QHBoxLayout(opacity_box)
@@ -265,6 +285,18 @@ class SettingsDialog(QDialog):
         self.s.color_status_done = hexv
         self.sm.save()
 
+    def _on_urgent_size(self, value: int) -> None:
+        self.s.urgent_fullscreen_size_delta = value
+        self.sm.save()
+
+    def _on_urgent_color(self, hexv: str) -> None:
+        self.s.urgent_fullscreen_color = hexv
+        self.sm.save()
+
+    def _on_urgent_style(self, index: int) -> None:
+        self.s.urgent_fullscreen_style_index = index
+        self.sm.save()
+
     def _on_opacity(self, value: int) -> None:
         self.s.opacity_percent = value
         self.opacity_label.setText(f"{value}%")
@@ -321,6 +353,8 @@ class SettingsDialog(QDialog):
             self.font_combo,
             self.style_combo,
             self.align_combo,
+            self.urgent_size_spin,
+            self.urgent_style_combo,
             self.opacity_slider,
             self.autostart_cb,
             self.tray_combo,

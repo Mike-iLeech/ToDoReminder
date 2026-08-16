@@ -106,7 +106,9 @@ class ReminderWindow(QWidget):
             statuses.append(TaskStatus.DONE)
         column_map = {}
         for st in statuses:
-            column_map[st] = [t for t in self._tasks if t.status is st]
+            col_tasks = [t for t in self._tasks if t.status is st]
+            col_tasks.sort(key=lambda t: (not t.urgent, t.position))
+            column_map[st] = col_tasks
 
         shown_total = sum(len(v) for v in column_map.values())
 
@@ -132,15 +134,23 @@ class ReminderWindow(QWidget):
             for task in column_map[st]:
                 base_font = QFont(font)
                 if task.urgent and task.status is not TaskStatus.DONE:
-                    base_font.setWeight(QFont.Bold)
-                    base_font.setPixelSize(s.text_size + 5)
+                    delta = s.urgent_fullscreen_size_delta
+                    style_idx = s.urgent_fullscreen_style_index
+                    base_font.setPixelSize(s.text_size + delta)
+                    if style_idx in (1, 3):
+                        base_font.setWeight(QFont.Bold)
+                    if style_idx in (2, 3):
+                        base_font.setItalic(True)
                 if task.status is TaskStatus.DONE:
                     base_font.setStrikeOut(True)
                     painter.setFont(base_font)
                     task_color = text_color.darker(160)
                 else:
                     painter.setFont(base_font)
-                    task_color = text_color
+                    if task.urgent and task.status is not TaskStatus.DONE:
+                        task_color = QColor(s.urgent_fullscreen_color)
+                    else:
+                        task_color = text_color
                 title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or " ")
                 rect = QRectF(x0 + 12, y, max(10, inner_w), 20000)
                 flags = self._align_flags()

@@ -42,6 +42,9 @@ class Settings:
     window_x: int = -9999          # sentinel: позиция не сохранена
     window_y: int = -9999
     regular_reset_date: str = ""   # день, когда регулярным задачам уже сбрасывали статус
+    urgent_fullscreen_size_delta: int = 5       # на сколько px больше базового размера шрифта срочных дел
+    urgent_fullscreen_color: str = "#FF0000"    # цвет текста срочных дел в полноэкранном уведомлении
+    urgent_fullscreen_style_index: int = 1      # 0 Обычный, 1 Жирный, 2 Курсив, 3 Жирный курсив
 
 
 class SettingsManager(QObject):
