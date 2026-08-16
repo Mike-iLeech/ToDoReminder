@@ -29,6 +29,7 @@ LIGHT = {
     "rep_border": "#4F7CF7",
     "reminder_bg": "#FFFFFF",
     "reminder_text": "#000000",
+    "reminder_urgent_text": "#B71C1C",
 }
 
 DARK = {
@@ -50,6 +51,7 @@ DARK = {
     "rep_border": "#6B9AFF",
     "reminder_bg": "#171C26",
     "reminder_text": "#FFFFFF",
+    "reminder_urgent_text": "#FF5252",
 }
 
 

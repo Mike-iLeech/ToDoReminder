@@ -500,9 +500,11 @@ class MainWindow(QWidget):
         target = "dark" if s.theme != "dark" else "light"
         c = DARK if target == "dark" else LIGHT
         # всегда подставляем дефолтные цвета напоминания под новую тему:
-        # фон — из целевой темы, текст — контрастный к новому фону
+        # фон — из целевой темы, текст — контрастный к новому фону,
+        # срочные — акцентный красный той же темы
         s.bg_color = c["reminder_bg"]
         s.text_color = c["reminder_text"]
+        s.urgent_fullscreen_color = c["reminder_urgent_text"]
         s.theme = target
         self._ctx.save_settings()
         self.apply_theme()
