@@ -124,13 +124,44 @@ class ReminderWindow(QWidget):
             total_h += h + gap
         return total_h - gap if col_tasks else margin_top
 
+    def _max_word_width(self, painter, columns: list[list[Task]], font_size: int) -> int:
+        """Возвращает ширину самого широкого слова среди всех задач (с учётом срочных)."""
+        s = self._settings
+        base_font = QFont(s.font_family)
+        if s.font_style_index in (1, 3):
+            base_font.setWeight(QFont.Bold)
+        if s.font_style_index in (2, 3):
+            base_font.setItalic(True)
+        urgent_delta = s.urgent_fullscreen_size_delta
+
+        max_w = 0
+        for col in columns:
+            for task in col:
+                size = font_size + urgent_delta if (task.urgent and task.status is not TaskStatus.DONE) else font_size
+                f = QFont(base_font)
+                f.setPixelSize(size)
+                painter.setFont(f)
+                fm = painter.fontMetrics()
+                title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or "")
+                for word in title.split():
+                    w = fm.horizontalAdvance(word)
+                    if w > max_w:
+                        max_w = w
+        return max_w
+
     def _calc_adaptive_font_size(self, painter, columns: list[list[Task]], base_size: int) -> int:
-        """Рассчитывает размер шрифта чтобы все колонки поместились в высоту экрана."""
+        """Рассчитывает размер шрифта чтобы все колонки поместились в высоту и ширину экрана."""
         h = self.height()
         n_cols = len(columns)
         col_width = w / n_cols if (w := self.width()) else 100.0
+        pad = max(8, int(self.width() * 0.02))
+        inner_w = max(10, int(col_width) - 2 * pad - 12)
 
         def fits(size: int) -> bool:
+            # Проверка ширины: ни одно слово не должно быть шире колонки
+            if self._max_word_width(painter, columns, size) > inner_w:
+                return False
+            # Проверка высоты
             for col in columns:
                 if not col:
                     continue
