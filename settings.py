@@ -45,6 +45,7 @@ class Settings:
     urgent_fullscreen_size_delta: int = 5       # на сколько px больше базового размера шрифта срочных дел
     urgent_fullscreen_color: str = "#FF0000"    # цвет текста срочных дел в полноэкранном уведомлении
     urgent_fullscreen_style_index: int = 1      # 0 Обычный, 1 Жирный, 2 Курсив, 3 Жирный курсив
+    fullscreen_min_font_size: int = 14          # минимальный размер шрифта при адаптации в полноэкранном окне
 
 
 class SettingsManager(QObject):

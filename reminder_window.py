@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QTextOption
 from PySide6.QtWidgets import QWidget
@@ -8,15 +10,16 @@ from models import Task, TaskStatus, status_color
 
 
 class ReminderWindow(QWidget):
-    """Полноэкранное уведомление с колонками статусов.
+    """Полноэкранное уведомление с 4 колонками: ToDo-1, ToDo-2, Started-1, Started-2.
 
     Показываются только активные задачи (Done скрыто, если настройка не включена).
-    Порядок внутри каждой колонки совпадает с порядком в главном списке.
+    Задачи распределяются round-robin по двум колонкам своего статуса.
+    Шрифт адаптируется под количество задач, чтобы всё поместилось в высоту экрана.
     """
 
     hiddenRequested = Signal()
 
-    STATUS_ORDER = [TaskStatus.TO_DO, TaskStatus.STARTED]
+    COLUMNS_PER_STATUS = 2
 
     def __init__(self, settings, tasks, is_preview: bool = False) -> None:
         super().__init__(None)
@@ -75,6 +78,101 @@ class ReminderWindow(QWidget):
         """Цвета полноэкранного напоминания всегда берутся из настроек (в любой теме)."""
         return self._settings.bg_color, self._settings.text_color
 
+    # ------------------------------------------------------------------ helpers
+
+    def _distribute_round_robin(self, tasks: list) -> tuple[list, list]:
+        """Распределяет задачи по двум колонкам round-robin."""
+        col_a: list = []
+        col_b: list = []
+        for i, t in enumerate(tasks):
+            if i % 2 == 0:
+                col_a.append(t)
+            else:
+                col_b.append(t)
+        return col_a, col_b
+
+    def _measure_column_height(self, painter, col_tasks: list[Task], font_size: int, col_width: float) -> int:
+        """Измеряет фактическую высоту колонки с учётом word-wrap и срочных задач."""
+        s = self._settings
+        base_font = QFont(s.font_family)
+        base_font.setPixelSize(font_size)
+        if s.font_style_index in (1, 3):
+            base_font.setWeight(QFont.Bold)
+        if s.font_style_index in (2, 3):
+            base_font.setItalic(True)
+
+        urgent_delta = s.urgent_fullscreen_size_delta
+        gap = max(8, font_size // 3)
+        margin_top = int(font_size * 0.5)
+        pad = max(8, int(self.width() * 0.02))
+        inner_w = max(10, int(col_width) - 2 * pad - 12)
+        align_flags = self._align_flags()
+
+        total_h = margin_top
+        for task in col_tasks:
+            if task.urgent and task.status is not TaskStatus.DONE:
+                size = font_size + urgent_delta
+            else:
+                size = font_size
+            f = QFont(base_font)
+            f.setPixelSize(size)
+            painter.setFont(f)
+            fm = painter.fontMetrics()
+            title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or " ")
+            rect = QRectF(0, 0, inner_w, 20000)
+            h = fm.boundingRect(rect.toRect(), align_flags | Qt.TextWordWrap, title).height()
+            total_h += h + gap
+        return total_h - gap if col_tasks else margin_top
+
+    def _calc_adaptive_font_size(self, painter, columns: list[list[Task]], base_size: int) -> int:
+        """Рассчитывает размер шрифта чтобы все колонки поместились в высоту экрана."""
+        h = self.height()
+        n_cols = len(columns)
+        col_width = w / n_cols if (w := self.width()) else 100.0
+
+        def fits(size: int) -> bool:
+            for col in columns:
+                if not col:
+                    continue
+                measured = self._measure_column_height(painter, col, size, col_width)
+                if measured > h:
+                    return False
+            return True
+
+        if fits(base_size):
+            return base_size
+
+        min_size = getattr(self._settings, "fullscreen_min_font_size", 14)
+        lo, hi = min_size, base_size
+        best = min_size
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if fits(mid):
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def _apply_urgent_style(self, font: QFont, task: Task, base_size: int) -> tuple[QFont, QColor]:
+        """Применяет стиль срочной задачи. Возвращает (font, color)."""
+        s = self._settings
+        if task.urgent and task.status is not TaskStatus.DONE:
+            f = QFont(font)
+            delta = s.urgent_fullscreen_size_delta
+            style_idx = s.urgent_fullscreen_style_index
+            f.setPixelSize(base_size + delta)
+            if style_idx in (1, 3):
+                f.setWeight(QFont.Bold)
+            if style_idx in (2, 3):
+                f.setItalic(True)
+            return f, QColor(s.urgent_fullscreen_color)
+        if task.status is TaskStatus.DONE:
+            f = QFont(font)
+            f.setStrikeOut(True)
+            return f, None
+        return font, None
+
     # ------------------------------------------------------------------ paint
 
     def paintEvent(self, event) -> None:
@@ -87,6 +185,99 @@ class ReminderWindow(QWidget):
         bg_hex, fg_hex = self._effective_colors()
         painter.fillRect(self.rect(), QColor(bg_hex))
 
+        text_color = QColor(fg_hex)
+
+        # Собираем задачи по статусам
+        todo_tasks = [t for t in self._tasks if t.status is TaskStatus.TO_DO]
+        started_tasks = [t for t in self._tasks if t.status is TaskStatus.STARTED]
+        done_tasks = [t for t in self._tasks if t.status is TaskStatus.DONE]
+
+        todo_tasks.sort(key=lambda t: (not t.urgent, t.position))
+        started_tasks.sort(key=lambda t: (not t.urgent, t.position))
+        done_tasks.sort(key=lambda t: (not t.urgent, t.position))
+
+        # Определяем колонки
+        columns: list[list[Task]] = []
+        todo_a, todo_b = self._distribute_round_robin(todo_tasks)
+        started_a, started_b = self._distribute_round_robin(started_tasks)
+        columns.append(todo_a)
+        columns.append(todo_b)
+        columns.append(started_a)
+        columns.append(started_b)
+
+        show_done = s.show_done_in_fullscreen and len(done_tasks) > 0
+        if show_done:
+            done_a, done_b = self._distribute_round_robin(done_tasks)
+            columns.append(done_a)
+            columns.append(done_b)
+
+        shown_total = sum(len(c) for c in columns)
+        if shown_total == 0:
+            self._paint_empty(painter, w, h)
+            return
+
+        n_cols = len(columns)
+        col_width = w / n_cols
+
+        # Адаптивный размер шрифта: измеряем фактическую высоту каждой колонки
+        base_size = self._calc_adaptive_font_size(painter, columns, s.text_size)
+
+        font = QFont(s.font_family)
+        font.setPixelSize(base_size)
+        if s.font_style_index == 1:
+            font.setWeight(QFont.Bold)
+        elif s.font_style_index == 3:
+            font.setWeight(QFont.Bold)
+            font.setItalic(True)
+        elif s.font_style_index == 2:
+            font.setItalic(True)
+
+        # Разделительные линии 3px между колонками
+        line_color = text_color
+        for ci in range(1, n_cols):
+            x = int(ci * col_width) - 1
+            painter.fillRect(QRect(x, 0, 3, h), line_color)
+
+        pad = max(8, int(w * 0.02))
+        align_flags = self._align_flags()
+
+        for ci, col_tasks in enumerate(columns):
+            x0 = int(ci * col_width) + pad
+            x1 = int((ci + 1) * col_width) - pad
+            inner_w = max(10, x1 - x0 - 12)
+            y = int(base_size * 0.5)
+
+            for task in col_tasks:
+                task_font, special_color = self._apply_urgent_style(font, task, base_size)
+                if task.status is TaskStatus.DONE:
+                    painter.setFont(task_font)
+                    task_color = text_color.darker(160)
+                else:
+                    painter.setFont(task_font)
+                    task_color = special_color if special_color else text_color
+
+                title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or " ")
+                rect = QRectF(x0 + 12, y, inner_w, 20000)
+                fmt = QTextOption(align_flags)
+                fmt.setWrapMode(QTextOption.WordWrap)
+                fm = painter.fontMetrics()
+                height = fm.boundingRect(rect.toRect(), align_flags | Qt.TextWordWrap, title).height()
+
+                painter.setPen(task_color)
+                painter.drawText(rect, align_flags | Qt.TextWordWrap, title)
+
+                # Визуальный статус — цветной маркер слева от названия
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(status_color(task.status, self._settings)))
+                painter.drawRoundedRect(QRectF(x0, y + 4, 6, max(6, height - 8)), 2, 2)
+                painter.setBrush(Qt.NoBrush)
+
+                gap = max(8, base_size // 3)
+                y += height + gap
+
+    def _paint_empty(self, painter, w: int, h: int) -> None:
+        message = "Вы не добавили ни одного дела в список"
+        s = self._settings
         font = QFont(s.font_family)
         font.setPixelSize(s.text_size)
         if s.font_style_index == 1:
@@ -97,90 +288,12 @@ class ReminderWindow(QWidget):
         elif s.font_style_index == 2:
             font.setItalic(True)
         painter.setFont(font)
-
         _, fg_hex = self._effective_colors()
-        text_color = QColor(fg_hex)
-
-        statuses = list(self.STATUS_ORDER)
-        if s.show_done_in_fullscreen and TaskStatus.DONE not in statuses:
-            statuses.append(TaskStatus.DONE)
-        column_map = {}
-        for st in statuses:
-            col_tasks = [t for t in self._tasks if t.status is st]
-            col_tasks.sort(key=lambda t: (not t.urgent, t.position))
-            column_map[st] = col_tasks
-
-        shown_total = sum(len(v) for v in column_map.values())
-
-        if shown_total == 0:
-            self._paint_empty(painter, font, text_color, w, h)
-            return
-
-        n_cols = len(statuses)
-        col_width = w / n_cols
-        line_color = text_color
-
-        # разделительные линии 3 px между колонками
-        for ci in range(1, n_cols):
-            x = int(ci * col_width) - 1
-            painter.fillRect(QRect(x, 0, 3, h), line_color)
-
-        pad = max(8, int(w * 0.02))
-        for ci, st in enumerate(statuses):
-            x0 = int(ci * col_width) + pad
-            x1 = int((ci + 1) * col_width) - pad
-            inner_w = x1 - x0 - 12
-            y = self.text_size_margin()
-            for task in column_map[st]:
-                base_font = QFont(font)
-                if task.urgent and task.status is not TaskStatus.DONE:
-                    delta = s.urgent_fullscreen_size_delta
-                    style_idx = s.urgent_fullscreen_style_index
-                    base_font.setPixelSize(s.text_size + delta)
-                    if style_idx in (1, 3):
-                        base_font.setWeight(QFont.Bold)
-                    if style_idx in (2, 3):
-                        base_font.setItalic(True)
-                if task.status is TaskStatus.DONE:
-                    base_font.setStrikeOut(True)
-                    painter.setFont(base_font)
-                    task_color = text_color.darker(160)
-                else:
-                    painter.setFont(base_font)
-                    if task.urgent and task.status is not TaskStatus.DONE:
-                        task_color = QColor(s.urgent_fullscreen_color)
-                    else:
-                        task_color = text_color
-                title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or " ")
-                rect = QRectF(x0 + 12, y, max(10, inner_w), 20000)
-                flags = self._align_flags()
-                fmt = QTextOption(flags)
-                fmt.setWrapMode(QTextOption.WordWrap)  # перенос по словам
-                fm = painter.fontMetrics()
-                height = fm.boundingRect(rect.toRect(), flags | Qt.TextWordWrap, title).height()
-                painter.setPen(task_color)
-                painter.drawText(rect, flags | Qt.TextWordWrap, title)
-                # визуальный статус — цветной маркер слева от названия
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(status_color(task.status, self._settings)))
-                painter.drawRoundedRect(QRectF(x0, y + 4, 6, max(6, height - 8)), 2, 2)
-                painter.setBrush(Qt.NoBrush)
-                y += height + self.text_gap()
-
-    def _paint_empty(self, painter, font, text_color, w, h) -> None:
-        message = "Вы не добавили ни одного дела в список"
-        painter.setPen(text_color)
-        painter.setFont(font)
+        painter.setPen(QColor(fg_hex))
         rect = QRectF(0, 0, w, h)
         fmt = QTextOption(Qt.AlignCenter)
         fmt.setWrapMode(QTextOption.WordWrap)
         painter.drawText(rect, message, fmt)
-
-    def text_size_margin(self) -> int:
-        return int(self._settings.text_size * 0.5)
-
-    def text_gap(self) -> int:
-        return max(8, self._settings.text_size // 3)
 
     def _align_flags(self) -> Qt.AlignmentFlag:
         alignments = [Qt.AlignLeft, Qt.AlignHCenter, Qt.AlignRight]
