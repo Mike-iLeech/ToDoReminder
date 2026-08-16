@@ -102,10 +102,27 @@ class TaskWidget(QWidget):
             font.setStrikeOut(True)
             self.label.setFont(font)
             self.label.set_color("#9CA3AF")
+        if task.urgent:
+            self.apply_urgent_style()
         layout.addWidget(self.label, 1)
 
     def _display_title(self) -> str:
-        return ("⟳ " if self.task.regular else "") + self.task.title
+        prefix = ""
+        if self.task.urgent:
+            prefix += "⚡ "
+        if self.task.regular:
+            prefix += "⟳ "
+        return prefix + self.task.title
+
+    def apply_urgent_style(self) -> None:
+        font = self.label.font()
+        if self.task.urgent:
+            font.setBold(True)
+            font.setPointSize(font.pointSize() + 5)
+        else:
+            font.setBold(False)
+            font.setPointSize(max(1, font.pointSize() - 5))
+        self.label.setFont(font)
 
     # ---- drag-события (делегируются списку) ----
     def mousePressEvent(self, event) -> None:
@@ -135,6 +152,9 @@ class TaskWidget(QWidget):
         act_rename = menu.addAction("Переименовать")
         act_delete = menu.addAction("Удалить")
         menu.addSeparator()
+        act_urgent = menu.addAction("Срочное" if not self.task.urgent else "Убрать срочность")
+        act_urgent.setCheckable(True)
+        act_urgent.setChecked(self.task.urgent)
         act_regular = menu.addAction("Регулярное")
         act_regular.setCheckable(True)
         act_regular.setChecked(self.task.regular)
@@ -143,6 +163,8 @@ class TaskWidget(QWidget):
             self.beginEditRequested.emit(self.task)
         elif chosen is act_delete:
             self.list_view.delete_handler(self.task)
+        elif chosen is act_urgent:
+            self.list_view.urgent_toggle_handler(self.task)
         elif chosen is act_regular:
             self.list_view.regular_toggle_handler(self.task)
 

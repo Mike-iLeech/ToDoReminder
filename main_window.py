@@ -246,6 +246,7 @@ class MainWindow(QWidget):
         self._list.rename_handler = self._rename_task
         self._list.delete_handler = self._delete_task
         self._list.regular_toggle_handler = self._toggle_regular
+        self._list.urgent_toggle_handler = self._toggle_urgent
 
         self.apply_theme()
         self.refresh(animate=False)
@@ -320,6 +321,14 @@ class MainWindow(QWidget):
         if index < 0:
             return
         self.store().set_regular(index, not self.store().tasks[index].regular)
+        self.save_data()
+        self.refresh()
+
+    def _toggle_urgent(self, task) -> None:
+        index = self._index_of(task)
+        if index < 0:
+            return
+        self.store().set_urgent(index, not self.store().tasks[index].urgent)
         self.save_data()
         self.refresh()
 

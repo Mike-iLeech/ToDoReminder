@@ -55,6 +55,7 @@ class TaskListWidget(QWidget):
         self.rename_handler = None
         self.delete_handler = None
         self.regular_toggle_handler = None
+        self.urgent_toggle_handler = None
 
         self.status_colors = None  # dict {TaskStatus: hex} из настроек
         self._app_filter_active = False
@@ -167,6 +168,11 @@ class TaskListWidget(QWidget):
         idx = self._widgets.index(self._pressed)
         if not self._pressed.task.status.is_active:
             # порядок активных задач свободный; Done блок не перетаскиваем
+            self._pressed = None
+            self._press_global = None
+            return
+        if self._pressed.task.urgent:
+            # срочные задачи закреплены вверху и не перетаскиваются
             self._pressed = None
             self._press_global = None
             return

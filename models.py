@@ -58,6 +58,7 @@ class Task:
     status: TaskStatus
     position: int = 0
     regular: bool = False
+    urgent: bool = False
 
     @classmethod
     def create(cls, title: str) -> "Task":
@@ -70,6 +71,7 @@ class Task:
             "status": self.status.value,
             "position": self.position,
             "regular": self.regular,
+            "urgent": self.urgent,
         }
 
     @classmethod
@@ -95,6 +97,7 @@ class Task:
             status=st,
             position=pos,
             regular=bool(data.get("regular", False)),
+            urgent=bool(data.get("urgent", False)),
         )
 
 
@@ -130,7 +133,9 @@ class TaskStore:
         if len(self.tasks) >= self.MAX_TASKS:
             raise TaskLimitError("Достигнуто максимальное количество задач: 100")
         task = Task.create(title)
-        self.tasks.insert(0, task)
+        # Новая задача вставляется после всех срочных активных (они всегда наверху)
+        insert_at = sum(1 for t in self.tasks if t.urgent and t.status.is_active)
+        self.tasks.insert(insert_at, task)
         self.rebuild_orders()
         return task
 
@@ -157,10 +162,10 @@ class TaskStore:
         old_status = task.status
         task.status = new_status
         if old_status is TaskStatus.DONE:
-            # выход из Done -> в конец активных, перед блоком Done
+            # выход из Done -> после срочных активных (они всегда наверху), перед остальными активными
             self.tasks.pop(index)
-            done = self._first_done_index()
-            self.tasks.insert(done, task)
+            urgent_active = sum(1 for t in self.tasks if t.urgent and t.status.is_active)
+            self.tasks.insert(urgent_active, task)
         elif new_status is TaskStatus.DONE:
             # переход в Done -> в конец списка (блок Done)
             self.tasks.pop(index)
@@ -171,6 +176,10 @@ class TaskStore:
         self.rebuild_orders()
 
     def move_to_slot(self, from_index: int, to_slot: int) -> None:
+        if not (0 <= from_index < len(self.tasks)):
+            return
+        if self.tasks[from_index].urgent:
+            return  # срочные задачи не перемещаются
         task = self.tasks.pop(from_index)
         n = len(self.tasks)
         to_slot = max(0, min(to_slot, n))
@@ -212,6 +221,21 @@ class TaskStore:
     def set_regular(self, index: int, value: bool) -> None:
         if 0 <= index < len(self.tasks):
             self.tasks[index].regular = value
+
+    def set_urgent(self, index: int, value: bool) -> None:
+        if not (0 <= index < len(self.tasks)):
+            return
+        task = self.tasks[index]
+        if task.urgent == value:
+            return
+        task.urgent = value
+        # Срочные активные задачи закрепляются вверху списка, сохраняя порядок
+        # их назначения (ранее назначенные — выше). Остальные — ниже. Done — в конце.
+        urgent_active = [t for t in self.tasks if t.urgent and t.status.is_active]
+        other_active = [t for t in self.tasks if not t.urgent and t.status.is_active]
+        done = [t for t in self.tasks if t.status is TaskStatus.DONE]
+        self.tasks = urgent_active + other_active + done
+        self.rebuild_orders()
 
     def reset_regular_to_todo(self) -> bool:
         """Сбрасывает статус регулярных задач на To Do и поднимает их в самый верх списка."""
