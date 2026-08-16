@@ -442,16 +442,17 @@ class MainWindow(QWidget):
         if not items:
             QMessageBox.information(self, "Импорт", "В файле нет задач.")
             return
-        answer = QMessageBox.question(
-            self,
-            "Режим импорта",
-            f"Найдено задач: {len(items)}\nКак импортировать?",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.Yes,
-        )
-        if answer == QMessageBox.Cancel:
+        box = QMessageBox(self)
+        box.setWindowTitle("Режим импорта")
+        box.setText(f"Найдено задач: {len(items)}")
+        btn_add = box.addButton("Добавить дела", QMessageBox.AcceptRole)
+        btn_replace = box.addButton("Заменить дела", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None:
             return
-        mode = "replace" if answer == QMessageBox.Yes else "add"
+        mode = "replace" if clicked == btn_replace else "add"
         added = apply_import(self.store(), items, mode)
         self.save_data()
         self.refresh()
