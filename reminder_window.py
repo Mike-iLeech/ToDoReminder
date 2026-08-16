@@ -130,15 +130,18 @@ class ReminderWindow(QWidget):
             inner_w = x1 - x0 - 12
             y = self.text_size_margin()
             for task in column_map[st]:
+                base_font = QFont(font)
+                if task.urgent and task.status is not TaskStatus.DONE:
+                    base_font.setWeight(QFont.Bold)
+                    base_font.setPixelSize(s.text_size + 5)
                 if task.status is TaskStatus.DONE:
-                    strike_font = QFont(font)
-                    strike_font.setStrikeOut(True)
-                    painter.setFont(strike_font)
+                    base_font.setStrikeOut(True)
+                    painter.setFont(base_font)
                     task_color = text_color.darker(160)
                 else:
-                    painter.setFont(font)
+                    painter.setFont(base_font)
                     task_color = text_color
-                title = task.title if task.title else " "
+                title = ("⚡ " + task.title) if (task.urgent and task.status is not TaskStatus.DONE) else (task.title or " ")
                 rect = QRectF(x0 + 12, y, max(10, inner_w), 20000)
                 flags = self._align_flags()
                 fmt = QTextOption(flags)
