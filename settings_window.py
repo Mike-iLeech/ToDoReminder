@@ -269,16 +269,43 @@ class SettingsDialog(QDialog):
         self._sync_done_cols_visibility()
         self.sm.save()
 
+    MAX_TOTAL_COLUMNS = 12
+
+    def _max_allowed(self, key: str) -> int:
+        """Максимум для колонки `key` при текущих значениях остальных."""
+        done_visible = self.done_combo.currentIndex() == 1
+        others = {
+            "todo": self.s.fullscreen_columns_started + (self.s.fullscreen_columns_done if done_visible else 0),
+            "started": self.s.fullscreen_columns_todo + (self.s.fullscreen_columns_done if done_visible else 0),
+            "done": self.s.fullscreen_columns_todo + self.s.fullscreen_columns_started,
+        }[key]
+        return max(1, self.MAX_TOTAL_COLUMNS - others)
+
     def _on_cols_todo(self, value: int) -> None:
-        self.s.fullscreen_columns_todo = value
+        clamped = min(value, self._max_allowed("todo"))
+        self.s.fullscreen_columns_todo = clamped
+        if self.cols_todo_spin.value() != clamped:
+            self.cols_todo_spin.blockSignals(True)
+            self.cols_todo_spin.setValue(clamped)
+            self.cols_todo_spin.blockSignals(False)
         self.sm.save()
 
     def _on_cols_started(self, value: int) -> None:
-        self.s.fullscreen_columns_started = value
+        clamped = min(value, self._max_allowed("started"))
+        self.s.fullscreen_columns_started = clamped
+        if self.cols_started_spin.value() != clamped:
+            self.cols_started_spin.blockSignals(True)
+            self.cols_started_spin.setValue(clamped)
+            self.cols_started_spin.blockSignals(False)
         self.sm.save()
 
     def _on_cols_done(self, value: int) -> None:
-        self.s.fullscreen_columns_done = value
+        clamped = min(value, self._max_allowed("done"))
+        self.s.fullscreen_columns_done = clamped
+        if self.cols_done_spin.value() != clamped:
+            self.cols_done_spin.blockSignals(True)
+            self.cols_done_spin.setValue(clamped)
+            self.cols_done_spin.blockSignals(False)
         self.sm.save()
 
     def _sync_done_cols_visibility(self) -> None:

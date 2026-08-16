@@ -2,7 +2,7 @@
 
 > **English:** [README.en.md](README.en.md)
 
-![Версия](https://img.shields.io/badge/version-2.6.3.0-blue)
+![Версия](https://img.shields.io/badge/version-2.6.3.1-blue)
 ![Лицензия](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)

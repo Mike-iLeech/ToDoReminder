@@ -498,12 +498,10 @@ class MainWindow(QWidget):
         s = self._ctx.settings_manager.s
         target = "dark" if s.theme != "dark" else "light"
         c = DARK if target == "dark" else LIGHT
-        # подставляем дефолтные цвета напоминания под новую тему, только если они
-        # ещё не кастомизированы пользователем (равны какому-либо дефолту темы)
-        if s.bg_color in (LIGHT["reminder_bg"], DARK["reminder_bg"]):
-            s.bg_color = c["reminder_bg"]
-        if s.text_color in (LIGHT["reminder_text"], DARK["reminder_text"]):
-            s.text_color = c["reminder_text"]
+        # всегда подставляем дефолтные цвета напоминания под новую тему:
+        # фон — из целевой темы, текст — контрастный к новому фону
+        s.bg_color = c["reminder_bg"]
+        s.text_color = c["reminder_text"]
         s.theme = target
         self._ctx.save_settings()
         self.apply_theme()

@@ -177,11 +177,11 @@ def test_import_export():
         p = d / f"exp.{fmt}"
         export_tasks(p, fmt, s)
         items = load_tasks(p, fmt)
-        check(f"{fmt} порядок сохраняется", [t for t, _ in items] == order)
+        check(f"{fmt} порядок сохраняется", [t for t, _, _, _ in items] == order)
         if fmt == "txt":
-            check("TXT без статусов", all(st is None for _, st in items))
+            check("TXT без статусов", all(st is None for _, st, _, _ in items))
         if fmt == "csv":
-            sts = [st.value if st else None for _, st in items]
+            sts = [st.value if st else None for _, st, _, _ in items]
             check("CSV со статусами", sts == [t.status.value for t in s.tasks])
 
     # заменить
@@ -197,7 +197,7 @@ def test_import_export():
     s4 = TaskStore()
     for i in range(100):
         s4.add(f"x{i}")
-    applied = apply_import(s4, [(f"New{i}", None) for i in range(50)], "add")
+    applied = apply_import(s4, [(f"New{i}", None, False, False) for i in range(50)], "add")
     check("импорт не превышает 100", len(s4.tasks) == 100 and applied == 0)
 
 

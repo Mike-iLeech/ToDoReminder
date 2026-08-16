@@ -36,17 +36,17 @@ def _clean_title(title: str) -> Optional[str]:
     return title
 
 
-def load_tasks(path: Path, fmt: str) -> List[Tuple[str, Optional[TaskStatus]]]:
-    """Возвращает список (title, status) из файла. TXT не содержит статусов."""
+def load_tasks(path: Path, fmt: str) -> List[Tuple[str, Optional[TaskStatus], bool, bool]]:
+    """Возвращает список (title, status, urgent, regular) из файла. TXT не содержит статусов."""
     path = Path(path)
     fmt = fmt.lower()
-    result: List[Tuple[str, Optional[TaskStatus]]] = []
+    result: List[Tuple[str, Optional[TaskStatus], bool, bool]] = []
 
     if fmt == "txt":
         for line in path.read_text(encoding="utf-8").splitlines():
             title = _clean_title(line)
             if title is not None:
-                result.append((title, None))
+                result.append((title, None, False, False))
     elif fmt == "csv":
         with open(path, encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f)
@@ -64,7 +64,7 @@ def load_tasks(path: Path, fmt: str) -> List[Tuple[str, Optional[TaskStatus]]]:
                         status = TaskStatus(row[1].strip())
                     except ValueError:
                         status = TaskStatus.TO_DO
-                result.append((title, status))
+                result.append((title, status, False, False))
     elif fmt == "json":
         data = json.loads(path.read_text(encoding="utf-8"))
         tasks = data.get("tasks", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
@@ -80,21 +80,25 @@ def load_tasks(path: Path, fmt: str) -> List[Tuple[str, Optional[TaskStatus]]]:
                     status = TaskStatus(str(item.get("status", TaskStatus.TO_DO.value)))
                 except ValueError:
                     status = TaskStatus.TO_DO
-                result.append((title, status))
+                urgent = bool(item.get("urgent", False))
+                regular = bool(item.get("regular", False))
+                result.append((title, status, urgent, regular))
     return result
 
 
-def apply_import(store: TaskStore, items: List[Tuple[str, Optional[TaskStatus]]], mode: str) -> int:
+def apply_import(store: TaskStore, items: List[Tuple[str, Optional[TaskStatus], bool, bool]], mode: str) -> int:
     """Применяет импорт. mode: 'replace' или 'add'. Возвращает число добавленных задач."""
     if mode == "replace":
         store.tasks = []
     added = 0
-    for title, status in items:
+    for title, status, urgent, regular in items:
         if len(store.tasks) >= TaskStore.MAX_TASKS:
             break
         task = Task.create(title)
         if status is not None:
             task.status = status
+        task.urgent = urgent
+        task.regular = regular
         store.tasks.append(task)
         added += 1
     store.rebuild_orders()
