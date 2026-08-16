@@ -46,6 +46,8 @@ class Settings:
     urgent_fullscreen_color: str = "#FF0000"    # цвет текста срочных дел в полноэкранном уведомлении
     urgent_fullscreen_style_index: int = 1      # 0 Обычный, 1 Жирный, 2 Курсив, 3 Жирный курсив
     fullscreen_min_font_size: int = 14          # минимальный размер шрифта при адаптации в полноэкранном окне
+    fullscreen_columns_todo: int = 2            # число колонок для задач To Do в полноэкранном уведомлении
+    fullscreen_columns_started: int = 2         # число колонок для задач Started в полноэкранном уведомлении
 
 
 class SettingsManager(QObject):

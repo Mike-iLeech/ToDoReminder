@@ -10,16 +10,15 @@ from models import Task, TaskStatus, status_color
 
 
 class ReminderWindow(QWidget):
-    """Полноэкранное уведомление с 4 колонками: ToDo-1, ToDo-2, Started-1, Started-2.
+    """Полноэкранное уведомление с настраиваемым числом колонок по статусам.
 
     Показываются только активные задачи (Done скрыто, если настройка не включена).
-    Задачи распределяются round-robin по двум колонкам своего статуса.
+    Задачи распределяются round-robin по колонкам своего статуса.
+    Число колонок для To Do и Started настраивается отдельно в настройках.
     Шрифт адаптируется под количество задач, чтобы всё поместилось в высоту экрана.
     """
 
     hiddenRequested = Signal()
-
-    COLUMNS_PER_STATUS = 2
 
     def __init__(self, settings, tasks, is_preview: bool = False) -> None:
         super().__init__(None)
@@ -80,16 +79,12 @@ class ReminderWindow(QWidget):
 
     # ------------------------------------------------------------------ helpers
 
-    def _distribute_round_robin(self, tasks: list) -> tuple[list, list]:
-        """Распределяет задачи по двум колонкам round-robin."""
-        col_a: list = []
-        col_b: list = []
+    def _distribute_round_robin(self, tasks: list, n_cols: int) -> list[list]:
+        """Распределяет задачи по n_cols колонкам round-robin."""
+        cols: list[list] = [[] for _ in range(n_cols)]
         for i, t in enumerate(tasks):
-            if i % 2 == 0:
-                col_a.append(t)
-            else:
-                col_b.append(t)
-        return col_a, col_b
+            cols[i % n_cols].append(t)
+        return cols
 
     def _measure_column_height(self, painter, col_tasks: list[Task], font_size: int, col_width: float) -> int:
         """Измеряет фактическую высоту колонки с учётом word-wrap и срочных задач."""
@@ -227,20 +222,19 @@ class ReminderWindow(QWidget):
         started_tasks.sort(key=lambda t: (not t.urgent, t.position))
         done_tasks.sort(key=lambda t: (not t.urgent, t.position))
 
-        # Определяем колонки
+        # Определяем колонки (число колонок настраивается отдельно для каждого статуса)
         columns: list[list[Task]] = []
-        todo_a, todo_b = self._distribute_round_robin(todo_tasks)
-        started_a, started_b = self._distribute_round_robin(started_tasks)
-        columns.append(todo_a)
-        columns.append(todo_b)
-        columns.append(started_a)
-        columns.append(started_b)
+        n_todo_cols = max(1, getattr(s, "fullscreen_columns_todo", 2))
+        n_started_cols = max(1, getattr(s, "fullscreen_columns_started", 2))
+        for col in self._distribute_round_robin(todo_tasks, n_todo_cols):
+            columns.append(col)
+        for col in self._distribute_round_robin(started_tasks, n_started_cols):
+            columns.append(col)
 
         show_done = s.show_done_in_fullscreen and len(done_tasks) > 0
         if show_done:
-            done_a, done_b = self._distribute_round_robin(done_tasks)
-            columns.append(done_a)
-            columns.append(done_b)
+            for col in self._distribute_round_robin(done_tasks, n_todo_cols):
+                columns.append(col)
 
         shown_total = sum(len(c) for c in columns)
         if shown_total == 0:

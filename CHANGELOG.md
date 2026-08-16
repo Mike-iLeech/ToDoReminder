@@ -2,12 +2,17 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/) и
 [Semantic Versioning](https://semver.org/lang/ru/).
-Актуальная версия: **v2.6.2.2** (2026-08-16).
+Актуальная версия: **v2.6.2.3** (2026-08-16).
 
 История ведётся с полного переписывания приложения (v2.0 «Full Rebuild»).
 Всё, что было до этого — старая версия 1.x, чей код в текущей кодовой базе не сохранился.
 
 ---
+
+## [2.6.2.3] — 2026-08-16
+
+### Добавлено
+- **Настраиваемое число колонок в полноэкранном напоминании:** отдельно для To Do и Started (от 1 до 8). По умолчанию — 2 колонки на каждый статус. Настройки доступны в окне настроек.
 
 ## [2.6.2.2] — 2026-08-16
 
@@ -139,6 +144,7 @@
 - **Портативность**: данные в папке `data` рядом с приложением.
 - Окно «О программе» с благодарностью 💙.
 
+[2.6.2.3]: https://github.com/Mike-iLeech/ToDoReminder/releases/tag/v2.6.2.3
 [2.6.2.2]: https://github.com/Mike-iLeech/ToDoReminder/releases/tag/v2.6.2.2
 [2.6.2.1]: https://github.com/Mike-iLeech/ToDoReminder/releases/tag/v2.6.2.1
 [2.6.1.1]: https://github.com/Mike-iLeech/ToDoReminder/releases/tag/v2.6.1.1

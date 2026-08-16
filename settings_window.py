@@ -61,6 +61,23 @@ class SettingsDialog(QDialog):
         self.done_combo.currentIndexChanged.connect(self._on_done)
         form.addRow("Выводить выполненные дела\nв полноэкранном уведомлении?", self.done_combo)
 
+        # число колонок по статусам в полноэкранном уведомлении
+        cols_label = QLabel("Колонки в полноэкранном уведомлении")
+        cols_label.setStyleSheet("font-weight: bold;")
+        form.addRow(cols_label)
+
+        self.cols_todo_spin = QSpinBox()
+        self.cols_todo_spin.setRange(1, 8)
+        self.cols_todo_spin.setValue(self.s.fullscreen_columns_todo)
+        self.cols_todo_spin.valueChanged.connect(self._on_cols_todo)
+        form.addRow("Колонки To Do", self.cols_todo_spin)
+
+        self.cols_started_spin = QSpinBox()
+        self.cols_started_spin.setRange(1, 8)
+        self.cols_started_spin.setValue(self.s.fullscreen_columns_started)
+        self.cols_started_spin.valueChanged.connect(self._on_cols_started)
+        form.addRow("Колонки Started", self.cols_started_spin)
+
         # монитор
         self.monitor_combo = QComboBox()
         self._monitor_items = []  # (index, screen_name or None for primary)
@@ -244,6 +261,14 @@ class SettingsDialog(QDialog):
         self.s.show_done_in_fullscreen = index == 1
         self.sm.save()
 
+    def _on_cols_todo(self, value: int) -> None:
+        self.s.fullscreen_columns_todo = value
+        self.sm.save()
+
+    def _on_cols_started(self, value: int) -> None:
+        self.s.fullscreen_columns_started = value
+        self.sm.save()
+
     def _on_monitor(self, index: int) -> None:
         name = self._monitor_items[index] if 0 <= index < len(self._monitor_items) else None
         self.s.monitor_name = name or ""
@@ -348,6 +373,8 @@ class SettingsDialog(QDialog):
         widgets = [
             self.interval_spin,
             self.done_combo,
+            self.cols_todo_spin,
+            self.cols_started_spin,
             self.monitor_combo,
             self.size_spin,
             self.font_combo,
@@ -364,6 +391,8 @@ class SettingsDialog(QDialog):
         try:
             self.interval_spin.setValue(s.reminder_interval_seconds // 60)
             self.done_combo.setCurrentIndex(1 if s.show_done_in_fullscreen else 0)
+            self.cols_todo_spin.setValue(s.fullscreen_columns_todo)
+            self.cols_started_spin.setValue(s.fullscreen_columns_started)
             self._select_monitor(s.monitor_name)
             self.size_spin.setValue(s.text_size)
             idx = self.font_combo.findText(s.font_family)
