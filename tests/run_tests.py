@@ -843,6 +843,13 @@ def test_issue_1():
     lst._widgets[0].del_btn.click()
     app.processEvents()
     check("после интервала крестик снова удаляет", len(ctx.store.tasks) == 2)
+    # быстрый щелчок по крестику в другом месте (другая карточка) — намеренный, не блокируется
+    from PySide6.QtCore import QPoint as _QPoint
+    from PySide6.QtGui import QCursor
+    lst._deleted_pos = QCursor.pos() + _QPoint(0, 200)
+    lst._widgets[0].del_btn.click()
+    app.processEvents()
+    check("быстрый щелчок в другом месте удаляет", len(ctx.store.tasks) == 1)
     main._quitting = True
     main.close()
 
@@ -866,7 +873,8 @@ def test_issue_1():
         win.resize(1600, 900)
         lay = win._current_layout()
         cols = lay.n_cols
-        more = [i.title for i in lay.items if i.marker is None]
+        more = [i.title for i in lay.items if i.marker is None and i.title.startswith("…")]
+        layout.notes = [i.title for i in lay.items if i.marker is None and i.title.startswith("Скрыто")]
         shown = sum(1 for i in lay.items if i.marker is not None)
         win.close()
         return cols, more, shown
@@ -881,6 +889,18 @@ def test_issue_1():
     cols, more, shown = layout(active + done, show_done_in_fullscreen=True,
                                fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
     check("при нехватке места Done скрываются, активные все видны", not more and shown == 80, f"cols={cols} more={more} shown={shown}")
+    check("о скрытых Done есть пометка", layout.notes == ["Скрыто выполненных: 60"], str(layout.notes))
+
+    # одни Done и не влезают — не пустой экран, а «… и ещё N»
+    cols, more, shown = layout(mk(300, TaskStatus.DONE), show_done_in_fullscreen=True)
+    hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
+    check("одни Done: экран не пустой", shown > 0 and shown + hidden == 300, f"shown={shown} hidden={hidden}")
+
+    # Done возвращаются, если после добавления колонок для активных им хватает места
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(3, TaskStatus.DONE), show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
+    check("Done возвращаются в свободную колонку", shown == 63 and not more and not layout.notes,
+          f"cols={cols} shown={shown} more={more} notes={layout.notes}")
 
     # не влезает в 1+1 колонку — колонки добавляются
     cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(10, TaskStatus.STARTED),

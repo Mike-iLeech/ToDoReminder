@@ -87,6 +87,7 @@ class TaskListWidget(QWidget):
         self._click_filter = _OutsideClickFilter(self)
         self._click_filter_active = False
         self._deleted_at = float("-inf")
+        self._deleted_pos = QPoint()
 
     # ------------------------------------------------------------------ API
 
@@ -119,11 +120,17 @@ class TaskListWidget(QWidget):
         if self.recently_deleted():
             return
         self._deleted_at = time.monotonic()
+        self._deleted_pos = QCursor.pos()
         if self.delete_handler is not None:
             self.delete_handler(task)
 
     def recently_deleted(self) -> bool:
-        return time.monotonic() - self._deleted_at < QApplication.doubleClickInterval() / 1000
+        """Щелчок пришёл в интервале двойного щелчка и почти в ту же точку, что и удаление.
+        Намеренный щелчок по другой карточке (в другом месте) не блокируется."""
+        if time.monotonic() - self._deleted_at >= QApplication.doubleClickInterval() / 1000:
+            return False
+        moved = (QCursor.pos() - self._deleted_pos).manhattanLength()
+        return moved <= QApplication.startDragDistance()
 
     def edit_started(self) -> None:
         if not self._click_filter_active:

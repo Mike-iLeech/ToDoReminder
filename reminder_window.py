@@ -60,6 +60,7 @@ class ReminderWindow(QWidget):
         self._tasks = list(tasks)
         self._tasks_version = 0
         self._layout_key = None
+        self._reserve = 0          # px снизу, временно занятые служебной строкой при подборе
         self._layout: _Layout | None = None
         self._is_preview = is_preview
         flags = Qt.FramelessWindowHint | Qt.Tool
@@ -194,45 +195,77 @@ class ReminderWindow(QWidget):
 
         Эскалация запускается только нехваткой ВЫСОТЫ: слишком длинное слово (ссылка и т.п.)
         лишь уменьшает шрифт, как и раньше, — лишние колонки его только сужают.
+        Выполненные скрываются, только если есть активные дела.
+
+        Возвращает (колонки, границы, размер шрифта, сколько выполненных убрано с экрана) —
+        последнее число показывается пометкой, чтобы Done не исчезали незаметно.
         """
         s = self._settings
         counts = self._configured_counts()
         done_tasks = self._by_status(TaskStatus.DONE)
         include_done = s.show_done_in_fullscreen and bool(done_tasks)
+        has_active = any(t.status.is_active for t in self._tasks)
         attempts = []
+
+        # строка «Скрыто выполненных: N» резервируется внизу, когда Done убраны с экрана;
+        # меряется с переносом по самой узкой колонке и шрифтом наибольшего размера
+        note_fm = QFontMetrics(self._base_font(s.text_size))
+        note_flags = self._align_flags() | Qt.TextWordWrap
 
         def attempt(cnts, with_done):
             cols = self._columns(cnts, with_done)
             bounds = self._col_bounds(len(cols))
-            size = self._adaptive_font_size(cols, bounds)
-            hidden_active, hidden_total = self._hidden_counts(cols, bounds, size)
-            if not with_done:
-                hidden_total += len(done_tasks)  # Done, убранные с экрана, тоже «скрыты»
+            dropped = len(done_tasks) if (include_done and not with_done) else 0
+            if dropped:
+                narrow = min(iw for _, iw in bounds)
+                note = self._dropped_note(dropped)
+                self._reserve = note_fm.boundingRect(QRect(0, 0, narrow, MEASURE_HEIGHT), note_flags, note).height() + 4
+            else:
+                self._reserve = 0
+            try:
+                size = self._adaptive_font_size(cols, bounds)
+                hidden_active, hidden_total = self._hidden_counts(cols, bounds, size)
+            finally:
+                self._reserve = 0
             words_ok = self._fits(cols, bounds, size, height=False)
-            attempts.append(((hidden_active, hidden_total), words_ok, (cols, bounds, size)))
-            return hidden_active == 0 and hidden_total == (0 if with_done else len(done_tasks))
+            attempts.append(((hidden_active, hidden_total + dropped), words_ok, (cols, bounds, size, dropped)))
+            return hidden_total == 0
+
+        def with_done_back(cnts):
+            # активным хватило места без Done — вдруг Done теперь помещаются в оставшиеся колонки
+            total = cnts[TaskStatus.TO_DO] + cnts[TaskStatus.STARTED] + cnts[TaskStatus.DONE]
+            if total <= MAX_TOTAL_COLUMNS and attempt(cnts, True) and (attempts[-1][1] or not base_words_ok):
+                return attempts[-1][2]
+            return None
 
         if attempt(counts, include_done):
             return attempts[-1][2]
         base_words_ok = attempts[0][1]
 
-        if include_done:
-            include_done = False
-            if attempt(counts, include_done):
+        # без активных дел скрывать Done бессмысленно — экран остался бы пустым
+        drop_done = include_done and has_active
+        if drop_done:
+            if attempt(counts, False):
                 return attempts[-1][2]
 
+        with_done = include_done and not drop_done
         statuses = [st for st in (TaskStatus.TO_DO, TaskStatus.STARTED) if self._by_status(st)]
+        if with_done:
+            statuses.append(TaskStatus.DONE)  # одни Done: расширяется их собственный блок
         counts = dict(counts)
 
         def rendered_total():
-            return counts[TaskStatus.TO_DO] + counts[TaskStatus.STARTED] + (counts[TaskStatus.DONE] if include_done else 0)
+            return counts[TaskStatus.TO_DO] + counts[TaskStatus.STARTED] + (counts[TaskStatus.DONE] if with_done else 0)
 
         while statuses and rendered_total() < MAX_TOTAL_COLUMNS:
             # колонку получает статус, у которого больше всего дел на одну колонку
             busiest = max(statuses, key=lambda st: len(self._by_status(st)) / counts[st])
             counts[busiest] += 1
-            if attempt(counts, include_done) and (attempts[-1][1] or not base_words_ok):
-                return attempts[-1][2]
+            if attempt(counts, with_done) and (attempts[-1][1] or not base_words_ok):
+                plan = attempts[-1][2]
+                if drop_done:
+                    return with_done_back(counts) or plan
+                return plan
 
         # целиком не влезает: из вариантов, где слова не стали вылезать за колонку сильнее
         # исходного, — тот, что скрывает меньше всего активных дел (при равенстве — более ранний)
@@ -240,12 +273,16 @@ class ReminderWindow(QWidget):
         best = min(valid, key=lambda a: a[0])
         return best[2]
 
+    @staticmethod
+    def _dropped_note(n: int) -> str:
+        return f"Скрыто выполненных: {n}"
+
     def _hidden_counts(self, columns, bounds, size: int) -> tuple[int, int]:
         """Сколько дел не помещается по высоте: (активных, всего)."""
         metrics = {kind: QFontMetrics(f) for kind, f in self._fonts_for(size).items()}
         flags = self._align_flags() | Qt.TextWordWrap
         gap = max(8, size // 3)
-        h = self.height()
+        h = self.height() - self._reserve
         active = total = 0
         for col, (_, inner_w) in zip(columns, bounds):
             y = int(size * 0.5)
@@ -277,7 +314,7 @@ class ReminderWindow(QWidget):
         metrics = {kind: QFontMetrics(f) for kind, f in self._fonts_for(size).items()}
         flags = self._align_flags() | Qt.TextWordWrap
         gap = max(8, size // 3)
-        h = self.height()
+        h = self.height() - self._reserve
         for col, (_, inner_w) in zip(columns, bounds):
             if not col:
                 continue
@@ -315,7 +352,7 @@ class ReminderWindow(QWidget):
         if not any(self._columns()):
             return None
         s = self._settings
-        columns, bounds, size = self._fit_plan()
+        columns, bounds, size, dropped_done = self._fit_plan()
         n_cols = len(columns)
         h = self.height()
         fonts = self._fonts_for(size)
@@ -330,7 +367,12 @@ class ReminderWindow(QWidget):
         more_color = QColor(text_color)
         more_color.setAlphaF(0.65)
 
+        def text_height(text, inner_w):
+            # с переносом: в узкой колонке служебная строка может занять две
+            return metrics["base"].boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, text).height()
+
         items = []
+        col_ends = []   # (y конца колонки, x0, inner_w) — место под пометку о скрытых Done
         for col, (x0, inner_w) in zip(columns, bounds):
             y = int(size * 0.5)
             col_items = []
@@ -353,18 +395,26 @@ class ReminderWindow(QWidget):
                 y += height + gap
             if hidden:
                 # не влезающие дела не обрезаются молча: строка «… и ещё N» (issue #1);
-                # если и ей нет места — освобождаем его, убирая последние дела колонки.
-                # Высота меряется с переносом: в узкой колонке строка может занять две.
-                def more_height(text):
-                    return metrics["base"].boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, text).height()
-
-                while col_items and y + more_height(f"… и ещё {hidden}") > h:
+                # если и ей нет места — освобождаем его, убирая последние дела колонки
+                while col_items and y + text_height(f"… и ещё {hidden}", inner_w) > h:
                     _, y = col_items.pop()
                     hidden += 1
                 text = f"… и ещё {hidden}"
-                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), more_height(text),
+                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), text_height(text, inner_w),
                                         more_font, more_color, None, text), y))
+                y = h  # колонка заполнена до низа
             items.extend(item for item, _ in col_items)
+            col_ends.append((y, x0, inner_w))
+
+        if dropped_done:
+            # Done убраны ради активных дел — сказать об этом там, где осталось место
+            text = self._dropped_note(dropped_done)
+            for y, x0, inner_w in sorted(col_ends, key=lambda c: c[0]):
+                th = text_height(text, inner_w)
+                if y + th <= h:
+                    items.append(_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), th,
+                                       more_font, more_color, None, text))
+                    break
         return _Layout(size, bounds, items, n_cols, self.width() / n_cols)
 
     def _current_layout(self) -> _Layout | None:
