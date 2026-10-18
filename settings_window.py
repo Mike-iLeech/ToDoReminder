@@ -30,6 +30,21 @@ HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 STYLE_NAMES = ["Обычный", "Жирный", "Курсив", "Жирный курсив"]
 
 
+class FontComboBox(QComboBox):
+    """Поле узкое, а раскрывающийся список — по ширине названий (каждое своим шрифтом).
+    Ширина считается при первом раскрытии: перебор сотен шрифтов при каждом открытии
+    окна настроек заметно его замедлял."""
+
+    _popup_sized = False
+
+    def showPopup(self) -> None:
+        if not self._popup_sized:
+            view = self.view()
+            view.setMinimumWidth(view.sizeHintForColumn(0) + 24)
+            self._popup_sized = True
+        super().showPopup()
+
+
 class SettingsDialog(QDialog):
     """Окно настроек. Каждое изменение сразу применяется и сохраняется."""
 
@@ -154,7 +169,7 @@ class SettingsDialog(QDialog):
 
         from PySide6.QtGui import QFontDatabase
 
-        self.font_combo = QComboBox()
+        self.font_combo = FontComboBox()
         # длинные названия шрифтов не должны растягивать строку из четырёх полей
         self.font_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.font_combo.setMinimumContentsLength(8)
@@ -164,9 +179,6 @@ class SettingsDialog(QDialog):
         idx = self.font_combo.findText(self.s.font_family)
         self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.font_combo.currentIndexChanged.connect(self._on_font)
-        # поле узкое, а раскрывающийся список — по ширине названий (каждое своим шрифтом)
-        view = self.font_combo.view()
-        view.setMinimumWidth(view.sizeHintForColumn(0) + 24)
 
         self.style_combo = QComboBox()
         self.style_combo.addItems(STYLE_NAMES)
@@ -362,7 +374,8 @@ class SettingsDialog(QDialog):
         scrollbar = self._scroll.verticalScrollBar().sizeHint().width()
         footer_h = self.layout().sizeHint().height() - self._scroll.sizeHint().height()
         margins = self.layout().contentsMargins()
-        # минимальная ширина — чтобы содержимое не обрезалось справа (горизонтальной прокрутки нет)
+        # минимальная ширина — чтобы содержимое не обрезалось справа (горизонтальная прокрутка
+        # появляется, только если экран уже этой ширины)
         min_width = content.minimumSizeHint().width() + scrollbar + margins.left() + margins.right() + 2
         width = max(560, hint.width() + scrollbar, min_width)
         height = hint.height() + max(0, footer_h)

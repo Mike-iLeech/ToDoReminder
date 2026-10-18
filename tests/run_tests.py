@@ -1053,25 +1053,37 @@ def test_settings_layout():
     check("поле интервала не сжато по высоте", dlg.interval_spin.height() >= dlg.interval_spin.sizeHint().height(),
           f"h={dlg.interval_spin.height()} hint={dlg.interval_spin.sizeHint().height()}")
 
+    # при исходном размере (если экран позволяет) горизонтальной прокрутки нет
+    hbar = dlg._scroll.horizontalScrollBar()
+    content_min = dlg._scroll.widget().minimumSizeHint().width()
+    dlg._fit_to_screen()
+    app.processEvents()
+    if avail.width() - 40 >= content_min + dlg._scroll.verticalScrollBar().sizeHint().width() + 2:
+        check("при обычной ширине горизонтальной прокрутки нет", hbar.maximum() == 0, f"max={hbar.maximum()}")
+
     # при минимальной ширине окна содержимое не обрезается справа
     dlg.resize(dlg.minimumWidth(), 400)
     app.processEvents()
     viewport_w = dlg._scroll.viewport().width()
-    content_min = dlg._scroll.widget().minimumSizeHint().width()
-    hbar = dlg._scroll.horizontalScrollBar()
     check("минимальная ширина не обрезает содержимое (или есть горизонтальная прокрутка)",
           viewport_w >= content_min or (hbar.isVisible() and hbar.maximum() > 0),
           f"viewport={viewport_w} content={content_min}")
-    check("при обычной ширине горизонтальной прокрутки нет",
-          dlg.minimumWidth() < content_min or not hbar.isVisible() or viewport_w >= content_min)
 
     # сброс к умолчанию обновляет и поля срочных дел
     dlg.urgent_size_spin.setValue(20)
     dlg.urgent_style_combo.setCurrentIndex(3)
 
     # сброс к умолчанию обновляет образцы цветов
-    from PySide6.QtWidgets import QMessageBox
-    ctx.settings_manager.s.bg_color = "#123456"
+    from PySide6.QtGui import QColor as _QColor
+    from PySide6.QtWidgets import QColorDialog, QMessageBox
+    orig_get = QColorDialog.getColor
+    QColorDialog.getColor = staticmethod(lambda *a, **k: _QColor("#123456"))
+    try:
+        dlg._color_refs["bg_color"][0].click()  # выбор цвета как пользователем
+    finally:
+        QColorDialog.getColor = orig_get
+    check("выбор цвета обновляет образец и настройку",
+          dlg._color_refs["bg_color"][0].text() == "#123456" and ctx.settings_manager.s.bg_color == "#123456")
     orig_q = QMessageBox.question
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     try:
