@@ -36,11 +36,13 @@ class SystemTray(QSystemTrayIcon):
         menu = QMenu()
         act_open = menu.addAction("Открыть основное окно")
         act_move = menu.addAction("Переместить окно на основной экран")
+        act_update = menu.addAction("Проверить обновления")
         menu.addSeparator()
         act_quit = menu.addAction("Выход")
 
         act_open.triggered.connect(ctx.open_main_window)
         act_move.triggered.connect(ctx.move_to_primary_screen)
+        act_update.triggered.connect(ctx.check_updates)
         act_quit.triggered.connect(ctx.quit)
 
         self.setContextMenu(menu)

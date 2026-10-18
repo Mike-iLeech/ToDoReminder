@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 from main_window import MainWindow
 from models import Task, TaskStatus, TaskStore
 from reminder_window import ReminderWindow
-from settings import SETTINGS_PATH, TASKS_PATH, SettingsManager
+from settings import TASKS_PATH, SettingsManager
 from storage import JsonFile
 from system_tray import SystemTray, make_app_icon
 from theme import TitlebarFilter
@@ -46,7 +46,7 @@ def preview_tasks() -> list:
 
 
 class ReminderManager(QObject):
-    """РўР°Р№РјРµСЂ РЅР°РїРѕРјРёРЅР°РЅРёР№: РїРѕР»РЅС‹Р№ РѕС‚СЃС‡С‘С‚ РїРѕСЃР»Рµ Р·Р°РїСѓСЃРєР°, СЃРєСЂС‹С‚РёСЏ, СЃРјРµРЅС‹ РёРЅС‚РµСЂРІР°Р»Р°."""
+    """Таймер напоминаний: полный отсчёт после запуска, скрытия, смены интервала."""
 
     def __init__(self, ctx) -> None:
         super().__init__()
@@ -85,7 +85,7 @@ class ReminderManager(QObject):
 
     def _fire(self) -> None:
         if self._reminder is not None and self._reminder.isVisible():
-            # РЅРµ СЃРѕР·РґР°РІР°С‚СЊ РІС‚РѕСЂРѕРµ РѕРєРЅРѕ вЂ” РѕР±РЅРѕРІРёС‚СЊ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµРµ
+            # не создавать второе окно — обновить существующее
             self._reminder.set_tasks(self._collect_tasks())
             return
         screen = self._selected_screen()
@@ -146,10 +146,12 @@ class AppContext:
         self.settings_dialog = None
         self.preview_window = None
         self.show_list_win = None
+        self.updates = None
 
-        # ежедневный сброс статусов регулярных задач (проверка раз в час)
+        # ежедневный сброс статусов регулярных задач; проверка даты почти бесплатна,
+        # поэтому раз в минуту — сброс происходит сразу после полуночи, а не в течение часа
         self._daily_timer = QTimer()
-        self._daily_timer.setInterval(3600000)
+        self._daily_timer.setInterval(60_000)
         self._daily_timer.timeout.connect(self._daily_check)
         self._daily_timer.start()
         self._daily_check()
@@ -187,6 +189,17 @@ class AppContext:
     def save_settings(self) -> None:
         self.settings_manager.save()
 
+    def save_all(self) -> None:
+        """Сохранить всё на диск немедленно (перед выходом или перезапуском)."""
+        self.save_data()
+        if self.main_window is not None:
+            self.main_window._save_position()
+        self.settings_manager.flush()
+
+    def check_updates(self) -> None:
+        if self.updates is not None:
+            self.updates.check(silent=False)
+
     def open_main_window(self) -> None:
         self.main_window.focus_input()
 
@@ -203,6 +216,7 @@ class AppContext:
         screens = QGuiApplication.screens()
         dlg = SettingsDialog(self.settings_manager, screens, parent)
         dlg.set_preview_callback(self.open_preview)
+        dlg.set_update_callback(self.check_updates)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.finished.connect(lambda _: setattr(self, "settings_dialog", None))
         self.settings_dialog = dlg
@@ -224,7 +238,7 @@ class AppContext:
             self.preview_window = None
 
     def show_task_list(self) -> None:
-        """РљРЅРѕРїРєР° В«РџРѕРєР°Р·Р°С‚СЊ СЃРїРёСЃРѕРєВ»: РїРѕР»РЅРѕСЌРєСЂР°РЅРЅС‹Р№ СЃРїРёСЃРѕРє Р·Р°РґР°С‡ РЅР° РІС‹Р±СЂР°РЅРЅРѕРј РјРѕРЅРёС‚РѕСЂРµ."""
+        """Кнопка «Показать список»: полноэкранный список задач на выбранном мониторе."""
         if self.show_list_win is not None:
             self.show_list_win.close()
             self.show_list_win = None
@@ -245,7 +259,7 @@ class AppContext:
             self.main_window._save_position()
         if self.reminders is not None:
             self.reminders.shutdown()
-        self.settings_manager.save()
+        self.settings_manager.flush()
         if self.tray is not None:
             self.tray.hide()
             self.app.processEvents()
@@ -282,10 +296,23 @@ def run(argv=None) -> None:
     ctx.settings_manager.changed.connect(ctx.main_window.sync_status_colors)
     ctx.settings_manager.changed.connect(ctx.main_window.sync_theme)
 
+    # выход через завершение сеанса Windows и т.п. — не потерять отложенную запись настроек
+    app.aboutToQuit.connect(ctx.settings_manager.flush)
+
+    from update_manager import UpdateManager
+
+    ctx.updates = UpdateManager(ctx)
+    ctx.updates.start()
+
     tray.show()
     if "--hide" in sys.argv:
         main_window.hide()
     else:
         main_window.show()
+    if "--updated" in sys.argv:
+        from version import APP_VERSION
+
+        tray.showMessage("ToDo Reminder", f"Программа обновлена до версии {APP_VERSION}",
+                         SystemTray.Information, 6000)
 
     sys.exit(app.exec())

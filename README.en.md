@@ -1,6 +1,6 @@
 # ToDo Reminder
 
-![Version](https://img.shields.io/badge/version-2.6.3.2-blue)
+![Version](https://img.shields.io/badge/version-2.7.0.0-blue)
 ![License](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)
@@ -28,6 +28,7 @@ fullscreen timer reminders, dark/light theme and a system tray.
 - **Import / export** as **JSON / TXT / CSV**.
 - **Clear list** only after confirmation.
 - **Portability** — all data lives in the `data` folder next to the program.
+- **Auto-update** — new versions are downloaded straight from GitHub Releases.
 
 ## Requirements
 
@@ -44,17 +45,23 @@ python main.py
 
 ## Build a portable EXE
 
-```bash
-# build dependencies
-pip install pyinstaller
-
-python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name "ToDoReminder" `
-    --icon "resources\icon.ico" `
-    --version-file "version_info.txt" `
-    --add-data "resources\icon.ico;resources" `
-    main.py
+```powershell
+pip install -r requirements.txt
+.\build.ps1
 ```
+
+The script generates the icon and version metadata (from `version.py`) and builds a one-file EXE with PyInstaller.
+
+## Releases and auto-update
+
+The app updates itself from **GitHub Releases** — no separate server is needed. It queries
+`api.github.com/repos/Mike-iLeech/ToDoReminder/releases/latest`, compares the tag with `APP_VERSION`
+and, if newer, offers to download the `ToDoReminder.exe` asset (SHA-256 verified), swaps its own EXE
+and restarts. The `data` folder is left untouched.
+
+To release: bump `APP_VERSION` in `version.py`, add a `CHANGELOG.md` section, merge to `main` and tag
+`vX.Y.Z.W`. The GitHub Actions workflow runs the tests, builds the EXE and publishes the release.
+Versions before 2.7.0.0 have no auto-update — move to 2.7.0.0 manually once.
 
 Result: `dist\ToDoReminder.exe`. It needs nothing but itself —
 data is created next to it (the `data` folder).
@@ -82,8 +89,10 @@ system_tray.py          system tray
 import_export.py        JSON/TXT/CSV import & export
 autostart.py, storage.py  autostart and storage
 version.py              app version
+updater.py              auto-update: GitHub API, download, EXE swap
+update_manager.py       auto-update: background checks and dialogs
 resources/icon.ico      icon
-tests/run_tests.py      60 automated tests
+tests/run_tests.py      automated tests
 docs/                   project documentation (technical specification)
 ```
 

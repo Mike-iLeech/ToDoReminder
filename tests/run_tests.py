@@ -19,6 +19,10 @@ from PySide6.QtWidgets import QApplication
 
 import settings as S
 import models
+
+# тесты не должны трогать автозапуск в реестре разработчика
+S.set_autostart = lambda enabled: None
+S.autostart_command = lambda: None
 from drag_manager import STEP
 from models import TaskLimitError, TaskStatus, TaskStore
 
@@ -368,7 +372,7 @@ def test_window():
     # сохранить/восстановить позицию
     main.move(123, 45)
     main._save_position()
-    ctx.settings_manager.save()
+    ctx.settings_manager.flush()
     ctx2 = AppContext(app)
     check("положение окна сохраняется",
           ctx2.settings_manager.s.window_x == 123 and ctx2.settings_manager.s.window_y == 45)
@@ -409,6 +413,137 @@ def test_fullscreen_render():
     empty.close()
 
 
+def test_performance_paths():
+    print("## Производительность: переиспользование и кэши")
+    from app import AppContext
+    from main_window import MainWindow
+    from reminder_window import ReminderWindow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    ctx.store.tasks.clear()
+    for i in range(10):
+        ctx.store.add(f"П{i}")
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    w = main._list
+
+    before = {wd.task.id: wd for wd in w._widgets}
+    target = ctx.store.tasks[3]
+    main._on_status_cycle(target)
+    after = {wd.task.id: wd for wd in w._widgets}
+    reused = sum(1 for tid, wd in after.items() if before.get(tid) is wd and tid != target.id)
+    check("карточки неизменившихся задач переиспользуются", reused == 9, f"reused={reused}")
+    check("изменившаяся карточка пересоздана", after[target.id] is not before[target.id])
+    check("порядок карточек = порядок задач", [wd.task.id for wd in w._widgets] == [t.id for t in ctx.store.tasks])
+
+    ctx.store.remove(0)
+    main.refresh(animate=False)
+    check("удалённая задача убрана из списка", len(w._widgets) == len(ctx.store.tasks))
+
+    # фильтр «клик вне поля» живёт только во время переименования
+    w._widgets[0].start_edit()
+    check("фильтр кликов включён при переименовании", w._click_filter_active)
+    w._widgets[0]._cancel_edit()
+    check("фильтр кликов снят после переименования", not w._click_filter_active)
+
+    # отложенная запись настроек
+    sm = ctx.settings_manager
+    sm.flush()
+    mtime = S.SETTINGS_PATH.stat().st_mtime_ns
+    sm.s.opacity_percent = 37
+    sm.save()
+    check("save() не пишет на диск сразу", S.SETTINGS_PATH.stat().st_mtime_ns == mtime and sm._save_timer.isActive())
+    sm.flush()
+    import json as _json
+    check("flush() записывает настройки", _json.loads(S.SETTINGS_PATH.read_text(encoding="utf-8"))["opacity_percent"] == 37)
+    sm.s.opacity_percent = 0
+    sm.flush()
+
+    # кэш раскладки полноэкранного окна
+    win = ReminderWindow(sm.s, ctx.store.tasks)
+    win.resize(1200, 800)
+    calls = []
+    orig = win._compute_layout
+    win._compute_layout = lambda: (calls.append(1), orig())[1]
+    win.grab()
+    win.grab()
+    check("раскладка считается один раз на два кадра", len(calls) == 1, f"calls={len(calls)}")
+    win.set_tasks(ctx.store.tasks[:3])
+    win.grab()
+    check("смена задач пересчитывает раскладку", len(calls) == 2)
+    sm.s.text_size += 2
+    win.grab()
+    check("смена настроек пересчитывает раскладку", len(calls) == 3)
+    sm.s.text_size -= 2
+    win.close()
+    main._quitting = True
+    main.close()
+
+
+def test_updater():
+    print("## Автообновление")
+    import hashlib
+    import updater
+
+    check("разбор версии", updater.parse_version("v2.6.3.2") == (2, 6, 3, 2))
+    check("хвостовые нули не важны", updater.parse_version("2.7") == updater.parse_version("v2.7.0.0"))
+    check("новее", updater.is_newer("v2.7.0.0", "2.6.3.2") and updater.is_newer("2.6.10", "2.6.9"))
+    check("не новее", not updater.is_newer("v2.6.3.2", "2.6.3.2") and not updater.is_newer("2.6.3.1", "2.6.3.2"))
+
+    release = {
+        "tag_name": "v2.7.0.0",
+        "body": "## Что нового",
+        "html_url": "https://example/rel",
+        "assets": [
+            {"name": "notes.txt", "browser_download_url": "https://example/notes.txt", "size": 1},
+            {"name": "ToDoReminder.exe", "browser_download_url": "https://example/app.exe", "size": 5,
+             "digest": "sha256:ABCDEF"},
+        ],
+    }
+    info = updater.parse_release(release)
+    check("выбран EXE-ассет", info is not None and info.asset_url.endswith("app.exe"))
+    check("версия и SHA-256 из релиза", info.version == "2.7.0.0" and info.sha256 == "abcdef")
+    check("релиз без EXE пропускается", updater.parse_release({"tag_name": "v9", "assets": []}) is None)
+
+    d = Path(tempfile.mkdtemp())
+    payload = b"new exe payload" * 1000
+    src = d / "remote.exe"
+    src.write_bytes(payload)
+    good = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), hashlib.sha256(payload).hexdigest())
+    got = updater.download(good, d / "dl.exe")
+    check("загрузка с проверкой SHA-256", got.read_bytes() == payload)
+
+    bad = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), "0" * 64)
+    try:
+        updater.download(bad, d / "bad.exe")
+        check("неверная контрольная сумма отклоняется", False)
+    except updater.UpdateError:
+        check("неверная контрольная сумма отклоняется",
+              not (d / "bad.exe").exists() and not (d / "bad.exe.part").exists())
+
+    try:
+        updater.download(good, d / "cancel.exe", cancelled=lambda: True)
+        check("отмена загрузки", False)
+    except updater.UpdateCancelled:
+        check("отмена загрузки", not (d / "cancel.exe").exists())
+
+    exe = d / "ToDoReminder.exe"
+    exe.write_bytes(b"old")
+    new = d / "ToDoReminder.exe.new"
+    new.write_bytes(b"new")
+    updater.swap_executables(exe, new)
+    check("подмена EXE", exe.read_bytes() == b"new" and updater.old_exe_path(exe).read_bytes() == b"old"
+          and not new.exists())
+
+    os.environ["_PYI_APPLICATION_HOME_DIR"] = "x"
+    env = updater.clean_child_env()
+    del os.environ["_PYI_APPLICATION_HOME_DIR"]
+    check("служебные переменные PyInstaller сброшены",
+          "_PYI_APPLICATION_HOME_DIR" not in env and env.get("PYINSTALLER_RESET_ENVIRONMENT") == "1")
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -417,6 +552,8 @@ def main():
     test_reminders()
     test_window()
     test_fullscreen_render()
+    test_performance_paths()
+    test_updater()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")

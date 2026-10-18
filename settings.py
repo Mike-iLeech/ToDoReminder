@@ -4,9 +4,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
-from autostart import is_autostart_enabled, set_autostart
+from autostart import autostart_command, build_command, is_autostart_enabled, set_autostart
 from storage import JsonFile
 
 if getattr(sys, "frozen", False):
@@ -49,17 +49,31 @@ class Settings:
     fullscreen_columns_todo: int = 2            # число колонок для задач To Do в полноэкранном уведомлении
     fullscreen_columns_started: int = 2         # число колонок для задач Started в полноэкранном уведомлении
     fullscreen_columns_done: int = 2            # число колонок для задач Done в полноэкранном уведомлении
+    auto_update_check: bool = True              # проверять обновления на GitHub автоматически
+    update_skip_version: str = ""               # версия, которую пользователь попросил не предлагать
 
 
 class SettingsManager(QObject):
+    """Настройки в памяти + отложенная запись на диск.
+
+    save() сразу оповещает подписчиков (changed), а файл пишется одним разом через
+    SAVE_DELAY_MS после последнего изменения: слайдер прозрачности или перетаскивание
+    окна больше не дёргают fsync и реестр на каждый пиксель. flush() пишет немедленно
+    (вызывается при выходе).
+    """
+
     changed = Signal()
+    SAVE_DELAY_MS = 400
 
     def __init__(self) -> None:
         super().__init__()
         self.s = self._load()
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(self.SAVE_DELAY_MS)
+        self._save_timer.timeout.connect(self.flush)
 
     def _load(self) -> Settings:
-        defaults = Settings()
         data = JsonFile(SETTINGS_PATH).load({})
         if not isinstance(data, dict):
             data = {}
@@ -85,7 +99,14 @@ class SettingsManager(QObject):
         return result
 
     def save(self) -> None:
-        data = asdict(self.s)
-        JsonFile(SETTINGS_PATH).save(data)
-        set_autostart(self.s.autostart)
+        self._save_timer.start()
         self.changed.emit()
+
+    def flush(self) -> None:
+        """Немедленно записать настройки на диск (и автозапуск в реестр, если он менялся)."""
+        self._save_timer.stop()
+        JsonFile(SETTINGS_PATH).save(asdict(self.s))
+        # реестр трогаем только при расхождении (в т.ч. если EXE переехал в другую папку)
+        wanted = build_command() if self.s.autostart else None
+        if autostart_command() != wanted:
+            set_autostart(self.s.autostart)

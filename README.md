@@ -2,7 +2,7 @@
 
 > **English:** [README.en.md](README.en.md)
 
-![Версия](https://img.shields.io/badge/version-2.6.3.2-blue)
+![Версия](https://img.shields.io/badge/version-2.7.0.0-blue)
 ![Лицензия](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)
@@ -32,6 +32,7 @@
 - **Автоудаление Done** — выполненные задачи удаляются при запуске приложения и при ежедневном сбросе регулярных задач.
 - **Очистка списка** только после подтверждения.
 - **Портативность** — все данные в папке `data` рядом с программой.
+- **Автообновление** — новые версии скачиваются прямо с GitHub Releases по кнопке «Обновить сейчас».
 
 ## Требования
 
@@ -48,17 +49,28 @@ python main.py
 
 ## Сборка портативного EXE
 
-```bash
-# зависимости для сборки
-pip install pyinstaller
-
-python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name "ToDoReminder" `
-    --icon "resources\icon.ico" `
-    --version-file "version_info.txt" `
-    --add-data "resources\icon.ico;resources" `
-    main.py
+```powershell
+pip install -r requirements.txt
+.\build.ps1
 ```
+
+Скрипт генерирует иконку и метаданные версии (из `version.py`) и собирает one-file EXE через PyInstaller.
+
+## Выпуск новой версии и автообновление
+
+Программа сама обновляется из **GitHub Releases** — отдельный сервер не нужен.
+Она запрашивает `api.github.com/repos/Mike-iLeech/ToDoReminder/releases/latest`, сравнивает версию
+с `APP_VERSION` и, если релиз новее, предлагает скачать ассет `ToDoReminder.exe` (с проверкой SHA-256),
+после чего подменяет свой EXE и перезапускается. Данные в папке `data` не затрагиваются.
+
+Чтобы выпустить версию:
+
+1. Поднять `APP_VERSION` и `APP_RELEASE_DATE` в `version.py`, дописать раздел в `CHANGELOG.md`.
+2. Влить изменения в `main` и поставить тег: `git tag v2.7.0.0 && git push origin v2.7.0.0`.
+3. GitHub Actions (`.github/workflows/release.yml`) прогонит тесты, соберёт EXE и опубликует релиз
+   с текстом из CHANGELOG — пользователи увидят предложение обновиться.
+
+Версии до 2.7.0.0 автообновления не имеют — на 2.7.0.0 нужно один раз перейти вручную.
 
 Готовый файл: `dist\ToDoReminder.exe`. Он не требует ничего кроме себя —
 данные создаются рядом (папка `data`).
@@ -86,8 +98,10 @@ system_tray.py          системный трей
 import_export.py        импорт/экспорт JSON/TXT/CSV
 autostart.py, storage.py  автозапуск и хранилище
 version.py              версия приложения
+updater.py              автообновление: GitHub API, загрузка, подмена EXE
+update_manager.py       автообновление: фоновые проверки и окна
 resources/icon.ico      иконка
-tests/run_tests.py      60 автотестов
+tests/run_tests.py      автотесты
 docs/                   документация проекта (техническое задание)
 ```
 

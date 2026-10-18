@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
@@ -20,6 +20,29 @@ class DragRepresentation(QLabel):
         self.setText(task.title)
         self.setProperty("dragRep", True)
         self.setFixedSize(280, WIDGET_HEIGHT)
+
+
+class _OutsideClickFilter(QObject):
+    """Клик вне переименовываемой карточки завершает переименование.
+
+    Фильтр ставится на приложение только на время редактирования: постоянный
+    фильтр уровня приложения гонял через Python каждое событие Qt.
+    """
+
+    def __init__(self, list_view) -> None:
+        super().__init__(list_view)
+        self._list = list_view
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.MouseButtonPress:
+            edited = self._list.active_edit_widget()
+            if edited is None:
+                self._list.edit_finished()
+            else:
+                w = QApplication.widgetAt(event.globalPosition().toPoint())
+                if w is not edited and w is not edited._edit:
+                    self._list.cancel_edit()
+        return False
 
 
 class TaskListWidget(QWidget):
@@ -59,6 +82,8 @@ class TaskListWidget(QWidget):
 
         self.status_colors = None  # dict {TaskStatus: hex} из настроек
         self._app_filter_active = False
+        self._click_filter = _OutsideClickFilter(self)
+        self._click_filter_active = False
 
     # ------------------------------------------------------------------ API
 
@@ -84,32 +109,70 @@ class TaskListWidget(QWidget):
             if w is not except_widget and w._edit is not None:
                 w.commit_edit()
 
+    def edit_started(self) -> None:
+        if not self._click_filter_active:
+            QApplication.instance().installEventFilter(self._click_filter)
+            self._click_filter_active = True
+
+    def edit_finished(self) -> None:
+        if self._click_filter_active and self.active_edit_widget() is None:
+            QApplication.instance().removeEventFilter(self._click_filter)
+            self._click_filter_active = False
+
+    def _visual_key(self, task) -> tuple:
+        """Всё, от чего зависит вид карточки. Совпал ключ — карточку можно переиспользовать."""
+        color = self.status_colors.get(task.status) if self.status_colors else None
+        return (task.title, task.status, task.regular, task.urgent, color)
+
+    def _create_widget(self, task) -> TaskWidget:
+        w = TaskWidget(task, self)
+        w.visual_key = self._visual_key(task)
+        w.statusRequested.connect(self.statusCycleRequested.emit)
+        w.statusReverseRequested.connect(self.statusReverseRequested.emit)
+        w.beginEditRequested.connect(w.start_edit)
+        w.setParent(self)
+        return w
+
     def rebuild(self, tasks, animate: bool = True) -> None:
-        prev_y = {w.task.id: w.y() for w in self._widgets}
-        for w in self._widgets:
-            w.deleteLater()
-        self._widgets = []
-        self._rep = None
+        """Синхронизирует карточки со списком задач.
+
+        Карточки неизменившихся задач переиспользуются (раньше пересоздавался весь
+        список на каждый клик); заново создаются только новые и изменившиеся.
+        """
+        old = {w.task.id: w for w in self._widgets}
+        if self._rep is not None:
+            self._remove_rep()
         self._pressed = None
         self._press_global = None
 
+        widgets: list[TaskWidget] = []
+        fresh: list[TaskWidget] = []
         for task in tasks:
-            w = TaskWidget(task, self)
-            w.statusRequested.connect(self.statusCycleRequested.emit)
-            w.statusReverseRequested.connect(self.statusReverseRequested.emit)
-            w.beginEditRequested.connect(w.start_edit)
-            w.setParent(self)
-            w.show()
-            self._widgets.append(w)
+            w = old.pop(task.id, None)
+            if w is not None and w.visual_key == self._visual_key(task):
+                w.task = task
+            else:
+                prev_y = w.y() if w is not None else None
+                if w is not None:
+                    w.hide()
+                    w.deleteLater()
+                w = self._create_widget(task)
+                if prev_y is not None:
+                    w.move(0, prev_y)
+                fresh.append(w)
+            widgets.append(w)
+        had_widgets = bool(self._widgets)
+        for w in old.values():
+            w.hide()
+            w.deleteLater()
+        self._widgets = widgets
 
         self.setFixedHeight(max(1, len(tasks) * STEP))
         self._apply_child_widths()
+        for w in fresh:
+            w.show()
 
-        if animate and prev_y and not self._dragging:
-            for w in self._widgets:
-                old = prev_y.get(w.task.id)
-                if old is not None:
-                    w.move(0, old)
+        if animate and had_widgets and not self._dragging:
             self._start_anim()
         else:
             self._place_standard()
@@ -270,7 +333,8 @@ class TaskListWidget(QWidget):
             y = w.y()
             dy = ty - y
             if abs(dy) > 0.5:
-                w.move(0, y + dy * 0.35)
+                step = dy * 0.35
+                w.move(0, ty if abs(step) < 1 else round(y + step))
                 moved = True
             elif dy != 0:
                 w.move(0, ty)
