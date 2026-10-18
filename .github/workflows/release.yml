@@ -14,6 +14,12 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # консоль раннера в cp1252: без UTF-8 print() кириллицы в тестах падает с UnicodeEncodeError
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      # Qt без экрана: тесты и tools/make_icon.py (QApplication) при сборке
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
 
