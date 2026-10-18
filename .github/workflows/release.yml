@@ -50,6 +50,7 @@ jobs:
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag dist/ToDoReminder.exe --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             gh release edit $tag --notes-file notes.md
           } else {
             gh release create $tag dist/ToDoReminder.exe --title "ToDo Reminder $($tag.TrimStart('v'))" --notes-file notes.md

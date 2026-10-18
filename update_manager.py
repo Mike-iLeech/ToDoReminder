@@ -72,6 +72,13 @@ class UpdateManager(QObject):
         self._first.start()
         self._periodic.start()
 
+    def shutdown(self) -> None:
+        """Выход из программы: остановить таймеры и прервать идущую загрузку."""
+        self._first.stop()
+        self._periodic.stop()
+        self._cleanup.stop()
+        self._cancel.set()
+
     def _cleanup_old(self) -> None:
         self._cleanup_tries += 1
         if updater.cleanup_old() or self._cleanup_tries >= 20:
@@ -231,18 +238,26 @@ class UpdateManager(QObject):
         self._progress_dlg = dlg
         dest = updater.download_path(exe)
 
+        bridge = self._bridge
+
+        def emit(signal, *args):
+            try:
+                signal.emit(*args)
+            except RuntimeError:
+                pass  # программа уже завершилась и мост удалён
+
         def work():
             try:
-                path = updater.download(info, dest, progress=self._bridge.progress.emit,
+                path = updater.download(info, dest, progress=lambda d, t: emit(bridge.progress, d, t),
                                         cancelled=self._cancel.is_set)
             except updater.UpdateCancelled:
-                self._bridge.download_failed.emit("")
+                emit(bridge.download_failed, "")
             except updater.UpdateError as e:
-                self._bridge.download_failed.emit(str(e))
+                emit(bridge.download_failed, str(e))
             except Exception as e:  # noqa: BLE001
-                self._bridge.download_failed.emit(f"Не удалось скачать обновление: {e}")
+                emit(bridge.download_failed, f"Не удалось скачать обновление: {e}")
             else:
-                self._bridge.downloaded.emit(path)
+                emit(bridge.downloaded, path)
 
         threading.Thread(target=work, name="update-download", daemon=True).start()
 

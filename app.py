@@ -262,6 +262,8 @@ class AppContext:
                 self.main_window._save_position()
         if self.reminders is not None:
             self.reminders.shutdown()
+        if self.updates is not None:
+            self.updates.shutdown()
         if save:
             self.settings_manager.flush()
         else:
