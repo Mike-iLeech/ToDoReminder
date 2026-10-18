@@ -913,6 +913,31 @@ def test_issue_1():
     check("колонки не добавляются статусу с одним делом", lay.n_cols == 6, f"cols={lay.n_cols}")
     win.close()
 
+    # высокое первое дело с делами под ним: обрезается, под ним «… и ещё N» в пределах экрана
+    # (30 огромных дел: даже 12 колонок не спасают, в каждой — обрезанное первое дело и «… и ещё N»)
+    huge = []
+    for i in range(30):
+        t = Task.create(f"{i} " + " ".join(["очень длинное описание дела"] * 60))
+        t.position = i
+        huge.append(t)
+    st = S.Settings()
+    st.text_size = 48
+    st.fullscreen_columns_todo, st.fullscreen_columns_started = 1, 1
+    win = ReminderWindow(st, huge)
+    win.resize(800, 600)
+    lay = win._current_layout()
+    shown = [i for i in lay.items if i.marker is not None]
+    more = [i for i in lay.items if i.title.startswith("…")]
+    hidden = sum(int(m.title.rsplit(" ", 1)[1]) for m in more)
+    clipped = all(i.rect.height() == i.height < 600 for i in shown)
+    more_ok = more and all(m.rect.y() + m.height <= 600 for m in more) and all(
+        any(m.rect.x() == s.rect.x() and m.rect.y() >= s.rect.y() + s.height for s in shown) for m in more)
+    check("высокое первое дело обрезано по видимой области", shown and clipped,
+          str([(i.rect.height(), i.height) for i in shown][:3]))
+    check("под обрезанным делом «… и ещё N» в пределах экрана", bool(more_ok) and len(shown) + hidden == 30,
+          f"shown={len(shown)} hidden={hidden}")
+    win.close()
+
     # пометка о скрытых Done не теряется ни при переполнении, ни когда активные легли впритык
     def note_case(w, h, text_size, n_todo, n_started, n_done):
         st = S.Settings()
