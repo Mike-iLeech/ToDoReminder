@@ -129,7 +129,10 @@ def download(info: ReleaseInfo, dest: Path, progress=None, cancelled=None, timeo
     try:
         with urllib.request.urlopen(_request(info.asset_url, "application/octet-stream"), timeout=timeout) as resp, \
                 open(part, "wb") as f:
-            total = int(resp.headers.get("Content-Length") or info.asset_size or 0)
+            try:
+                total = int(resp.headers.get("Content-Length") or info.asset_size or 0)
+            except ValueError:
+                total = info.asset_size
             while True:
                 if cancelled is not None and cancelled():
                     raise UpdateCancelled("Загрузка отменена.")

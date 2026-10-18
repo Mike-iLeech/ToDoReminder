@@ -567,17 +567,50 @@ def test_review_fixes():
     dlg.show()
     app.processEvents()
     info = updater.ReleaseInfo("99.0", "v99.0", "", "https://example/rel", "https://example/a.exe", 1, None)
+    from PySide6.QtCore import QEvent, QObject
+
+    class BlockSpy(QObject):
+        blocked = False
+
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.WindowBlocked:
+                BlockSpy.blocked = True
+            return False
+
+    spy = BlockSpy()
+    app.installEventFilter(spy)
     um._on_checked(info, False)
     app.processEvents()
     offer = um._dialog
+    app.removeEventFilter(spy)
     check("окно обновления не заблокировано настройками",
-          offer is not None and offer.parentWidget() is dlg, f"parent={offer.parentWidget() if offer else None}")
+          offer is not None and offer.parentWidget() is None and not BlockSpy.blocked,
+          f"blocked={BlockSpy.blocked}")
     # фоновая проверка не пересоздаёт уже открытое окно той же версии
     um._on_checked(info, True)
     check("фоновая проверка не пересоздаёт окно", um._dialog is offer)
-    offer.close()
     dlg.close()
+    dlg.deleteLater()
     app.processEvents()
+    check("закрытие настроек не уничтожает окно обновления", um._dialog is offer and offer.isVisible())
+
+    # повторная ручная проверка: destroyed старого окна не обнуляет ссылку на новое
+    um._on_checked(info, False)
+    second = um._dialog
+    from PySide6.QtCore import QCoreApplication
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    check("ссылка на текущее окно переживает удаление прежнего", um._dialog is second and second is not offer)
+    um._on_checked(info, True)
+    check("после этого фоновая проверка не плодит окна", um._dialog is second)
+    second.close()
+    app.processEvents()
+
+    # результат проверки во время загрузки не открывает окон
+    um._downloading = True
+    um._on_checked(info, False)
+    check("во время загрузки предложение не показывается", um._dialog is None)
+    um._downloading = False
 
     # отмена, пришедшая после последнего чанка, не ставит обновление
     d = Path(tempfile.mkdtemp())
