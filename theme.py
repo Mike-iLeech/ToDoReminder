@@ -226,6 +226,17 @@ def build_stylesheet(theme: str) -> str:
     TaskWidget[card="true"] {{ background: {c['card_bg']}; border: 1px solid {c['card_border']}; border-radius: 10px; }}
     TaskWidget[card="true"]:hover {{ border-color: {c['card_hover']}; }}
     TaskWidget[card="true"] ElidedLabel {{ background: transparent; color: {c['text']}; font-size: 13px; }}
+    QPushButton[deleteBtn="true"] {{
+        background: transparent;
+        border: none;
+        border-radius: 6px;
+        padding: 0;
+        color: {c['muted']};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton[deleteBtn="true"]:hover {{ background: {c['hover']}; color: #E5484D; }}
+    QPushButton[deleteBtn="true"]:pressed {{ background: {c['pressed']}; color: #E5484D; }}
     QLabel[dragRep="true"] {{
         background: {c['card_bg']};
         border: 1px solid {c['rep_border']};

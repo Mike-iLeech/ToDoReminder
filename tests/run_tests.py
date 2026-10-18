@@ -758,6 +758,110 @@ def test_update_polish():
     main.close()
 
 
+def test_issue_1():
+    print("## Issue #1: автоудаление, крестик, переполнение напоминания")
+    from app import AppContext
+    from main_window import MainWindow
+    from models import Task
+    from reminder_window import ReminderWindow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # 1. автоудаление выполненных — настраивается
+    ctx = AppContext(app)
+    ctx.store.tasks.clear()
+    ctx.store.add("готовое")
+    ctx.store.add("регулярное")
+    ctx.store.set_status(0, TaskStatus.DONE)
+    ctx.store.set_regular(ctx.store.tasks.index(next(t for t in ctx.store.tasks if t.title == "регулярное")), True)
+    for t in ctx.store.tasks:
+        t.status = TaskStatus.DONE
+    s = ctx.settings_manager.s
+    s.auto_remove_done = False
+    ctx._startup_cleanup()
+    s.regular_reset_date = "2000-01-01"
+    ctx._daily_check()
+    titles = {t.title: t.status for t in ctx.store.tasks}
+    check("выключено: Done не удаляются ни при запуске, ни в новый день", titles.get("готовое") is TaskStatus.DONE)
+    check("выключено: регулярные всё равно сбрасываются в To Do", titles.get("регулярное") is TaskStatus.TO_DO)
+    s.auto_remove_done = True
+    s.regular_reset_date = "2000-01-01"
+    ctx._daily_check()
+    check("включено: Done удаляются в новый день", [t.title for t in ctx.store.tasks] == ["регулярное"])
+    ctx.store.tasks[0].status = TaskStatus.DONE
+    ctx._startup_cleanup()
+    check("включено: Done удаляются при запуске", not ctx.store.tasks)
+
+    # 2. крестик удаления на карточке
+    ctx.store.add("удали меня")
+    ctx.store.add("останься")
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    app.processEvents()
+    w = main._list.widget_by_task(next(t for t in ctx.store.tasks if t.title == "удали меня"))
+    check("у карточки есть крестик", w is not None and w.del_btn.isVisible())
+    w.del_btn.click()
+    app.processEvents()
+    check("крестик удаляет задачу", [t.title for t in ctx.store.tasks] == ["останься"])
+    w2 = main._list._widgets[0]
+    w2.start_edit()
+    check("поле переименования не наезжает на крестик",
+          w2._edit.geometry().right() < w2.del_btn.geometry().left())
+    w2._cancel_edit()
+    main._quitting = True
+    main.close()
+
+    # 3. переполнение полноэкранного напоминания
+    def mk(n, status, title="Дело с описанием средней длины"):
+        out = []
+        for i in range(n):
+            t = Task.create(f"{title} {i}")
+            t.status = status
+            t.position = i
+            out.append(t)
+        return out
+
+    def layout(tasks, **over):
+        st = S.Settings()
+        st.text_size = 32
+        st.fullscreen_min_font_size = 14
+        for k, v in over.items():
+            setattr(st, k, v)
+        win = ReminderWindow(st, tasks)
+        win.resize(1600, 900)
+        lay = win._current_layout()
+        cols = lay.n_cols
+        more = [i.title for i in lay.items if i.marker is None]
+        shown = sum(1 for i in lay.items if i.marker is not None)
+        win.close()
+        return cols, more, shown
+
+    few = mk(6, TaskStatus.TO_DO)
+    cols, more, shown = layout(few)
+    check("влезает — раскладка как настроена (2+2)", cols == 4 and not more and shown == 6)
+
+    # Done занимает место: при нехватке выполненные скрываются, активные — все на экране
+    active = mk(40, TaskStatus.TO_DO) + mk(40, TaskStatus.STARTED)
+    done = mk(60, TaskStatus.DONE)
+    cols, more, shown = layout(active + done, show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
+    check("при нехватке места Done скрываются, активные все видны", not more and shown == 80, f"cols={cols} more={more} shown={shown}")
+
+    # не влезает в 1+1 колонку — колонки добавляются
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(10, TaskStatus.STARTED),
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1)
+    check("при нехватке места добавляются колонки", cols > 2 and not more and shown == 70, f"cols={cols} more={more}")
+    check("колонок не больше 12", cols <= 12)
+
+    # не влезает никак — «… и ещё N», ничего не теряется молча
+    many = mk(100, TaskStatus.TO_DO, "Дело номер с очень длинным описанием, которое переносится на несколько строк подряд")
+    cols, more, shown = layout(many)
+    hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
+    check("если не влезает — строка «… и ещё N»", bool(more))
+    check("показанные + скрытые = все дела", shown + hidden == 100, f"shown={shown} hidden={hidden}")
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -770,6 +874,7 @@ def main():
     test_updater()
     test_review_fixes()
     test_update_polish()
+    test_issue_1()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")

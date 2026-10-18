@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from reminder_window import MAX_TOTAL_COLUMNS
 from settings import Settings
 from theme import build_stylesheet
 
@@ -61,6 +62,12 @@ class SettingsDialog(QDialog):
         self.done_combo.setCurrentIndex(1 if self.s.show_done_in_fullscreen else 0)
         self.done_combo.currentIndexChanged.connect(self._on_done)
         form.addRow("Выводить выполненные дела\nв полноэкранном уведомлении?", self.done_combo)
+
+        # автоудаление выполненных (issue #1)
+        self.auto_remove_cb = QCheckBox("Удалять выполненные дела в начале нового дня и при запуске")
+        self.auto_remove_cb.setChecked(self.s.auto_remove_done)
+        self.auto_remove_cb.toggled.connect(self._on_auto_remove)
+        form.addRow(self.auto_remove_cb)
 
         # число колонок по статусам в полноэкранном уведомлении
         cols_label = QLabel("Колонки в полноэкранном уведомлении")
@@ -281,7 +288,7 @@ class SettingsDialog(QDialog):
         self._sync_done_cols_visibility()
         self.sm.save()
 
-    MAX_TOTAL_COLUMNS = 12
+    MAX_TOTAL_COLUMNS = MAX_TOTAL_COLUMNS
 
     def _max_allowed(self, key: str) -> int:
         """Максимум для колонки `key` при текущих значениях остальных."""
@@ -390,6 +397,10 @@ class SettingsDialog(QDialog):
         self.s.tray_action_index = index
         self.sm.save()
 
+    def _on_auto_remove(self, checked: bool) -> None:
+        self.s.auto_remove_done = checked
+        self.sm.save()
+
     def _on_auto_update(self, checked: bool) -> None:
         self.s.auto_update_check = checked
         self.sm.save()
@@ -455,6 +466,7 @@ class SettingsDialog(QDialog):
             self.urgent_style_combo,
             self.opacity_slider,
             self.autostart_cb,
+            self.auto_remove_cb,
             self.auto_update_cb,
             self.tray_combo,
         ]
@@ -476,6 +488,7 @@ class SettingsDialog(QDialog):
             self.opacity_slider.setValue(s.opacity_percent)
             self.opacity_label.setText(f"{s.opacity_percent}%")
             self.autostart_cb.setChecked(s.autostart)
+            self.auto_remove_cb.setChecked(s.auto_remove_done)
             self.auto_update_cb.setChecked(s.auto_update_check)
             self.tray_combo.setCurrentIndex(s.tray_action_index)
         finally:

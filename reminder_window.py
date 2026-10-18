@@ -10,6 +10,7 @@ from models import Task, TaskStatus, status_color
 
 TEXT_LEFT = 12            # отступ текста от левого края колонки (место под маркер статуса)
 MEASURE_HEIGHT = 20000    # «бесконечная» высота прямоугольника при измерении переноса
+MAX_TOTAL_COLUMNS = 12    # общий предел колонок (тот же, что в настройках)
 
 
 @dataclass
@@ -150,13 +151,24 @@ class ReminderWindow(QWidget):
 
     # ------------------------------------------------------------------ layout
 
-    def _columns(self) -> list[list[Task]]:
-        s = self._settings
+    def _by_status(self, status) -> list[Task]:
+        tasks = [t for t in self._tasks if t.status is status]
+        tasks.sort(key=lambda t: (not t.urgent, t.position))
+        return tasks
 
-        def by_status(status):
-            tasks = [t for t in self._tasks if t.status is status]
-            tasks.sort(key=lambda t: (not t.urgent, t.position))
-            return tasks
+    def _configured_counts(self) -> dict:
+        s = self._settings
+        return {
+            TaskStatus.TO_DO: max(1, getattr(s, "fullscreen_columns_todo", 2)),
+            TaskStatus.STARTED: max(1, getattr(s, "fullscreen_columns_started", 2)),
+            TaskStatus.DONE: max(1, getattr(s, "fullscreen_columns_done", 2)),
+        }
+
+    def _columns(self, counts: dict | None = None, include_done: bool | None = None) -> list[list[Task]]:
+        s = self._settings
+        counts = counts or self._configured_counts()
+        if include_done is None:
+            include_done = s.show_done_in_fullscreen
 
         def round_robin(tasks, n_cols):
             cols = [[] for _ in range(max(1, n_cols))]
@@ -164,12 +176,57 @@ class ReminderWindow(QWidget):
                 cols[i % len(cols)].append(t)
             return cols
 
-        columns = round_robin(by_status(TaskStatus.TO_DO), getattr(s, "fullscreen_columns_todo", 2))
-        columns += round_robin(by_status(TaskStatus.STARTED), getattr(s, "fullscreen_columns_started", 2))
-        done = by_status(TaskStatus.DONE)
-        if s.show_done_in_fullscreen and done:
-            columns += round_robin(done, getattr(s, "fullscreen_columns_done", 2))
+        columns = round_robin(self._by_status(TaskStatus.TO_DO), counts[TaskStatus.TO_DO])
+        columns += round_robin(self._by_status(TaskStatus.STARTED), counts[TaskStatus.STARTED])
+        done = self._by_status(TaskStatus.DONE)
+        if include_done and done:
+            columns += round_robin(done, counts[TaskStatus.DONE])
         return columns
+
+    def _fit_plan(self):
+        """Колонки, их границы и размер шрифта, при которых список помещается на экран.
+
+        Сначала шрифт уменьшается до минимального (как раньше). Если дела не влезают и так
+        (issue #1), то по очереди: скрываются выполненные, затем статусам с самыми длинными
+        колонками добавляются колонки (всего не больше MAX_TOTAL_COLUMNS). Если не помогло
+        и это — остаётся исходная раскладка, а не влезающие дела сворачиваются в «… и ещё N».
+        """
+        s = self._settings
+        counts = self._configured_counts()
+        include_done = s.show_done_in_fullscreen
+
+        def attempt(cnts, with_done):
+            cols = self._columns(cnts, with_done)
+            bounds = self._col_bounds(len(cols))
+            size = self._adaptive_font_size(cols, bounds)
+            return cols, bounds, size, self._fits(cols, bounds, size)
+
+        cols, bounds, size, ok = attempt(counts, include_done)
+        if ok:
+            return cols, bounds, size
+        fallback = (cols, bounds, size)
+
+        if include_done and self._by_status(TaskStatus.DONE):
+            include_done = False
+            cols, bounds, size, ok = attempt(counts, include_done)
+            if ok:
+                return cols, bounds, size
+            fallback = (cols, bounds, size)
+
+        statuses = [TaskStatus.TO_DO, TaskStatus.STARTED]
+        if include_done:
+            statuses.append(TaskStatus.DONE)
+        counts = dict(counts)
+        while sum(counts[st] for st in statuses) < MAX_TOTAL_COLUMNS:
+            # колонку получает статус, у которого больше всего дел на одну колонку
+            busiest = max(statuses, key=lambda st: len(self._by_status(st)) / counts[st])
+            if not self._by_status(busiest):
+                break
+            counts[busiest] += 1
+            cols, bounds, size, ok = attempt(counts, include_done)
+            if ok:
+                return cols, bounds, size
+        return fallback
 
     def _col_bounds(self, n_cols: int) -> list[tuple[int, int]]:
         w = self.width()
@@ -221,13 +278,12 @@ class ReminderWindow(QWidget):
         return best
 
     def _compute_layout(self) -> _Layout | None:
-        columns = self._columns()
-        if not any(columns):
+        if not any(self._columns()):
             return None
         s = self._settings
+        columns, bounds, size = self._fit_plan()
         n_cols = len(columns)
-        bounds = self._col_bounds(n_cols)
-        size = self._adaptive_font_size(columns, bounds)
+        h = self.height()
         fonts = self._fonts_for(size)
         metrics = {kind: QFontMetrics(f) for kind, f in fonts.items()}
         flags = self._align_flags() | Qt.TextWordWrap
@@ -236,22 +292,41 @@ class ReminderWindow(QWidget):
         markers = {st: QColor(status_color(st, s)) for st in TaskStatus}
         gap = max(8, size // 3)
 
+        more_font = fonts["base"]
+        more_h = metrics["base"].height()
+        more_color = QColor(text_color)
+        more_color.setAlphaF(0.65)
+
         items = []
         for col, (x0, inner_w) in zip(columns, bounds):
             y = int(size * 0.5)
-            for task in col:
+            col_items = []
+            hidden = 0
+            for i, task in enumerate(col):
                 kind = self._font_kind(task)
                 title = _title(task)
                 height = metrics[kind].boundingRect(QRect(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), flags, title).height()
+                if y + height > h:
+                    hidden = len(col) - i
+                    break
                 if kind == "done":
                     color = text_color.darker(160)
                 elif kind == "urgent":
                     color = urgent_color
                 else:
                     color = text_color
-                items.append(_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), height,
-                                   fonts[kind], color, markers[task.status], title))
+                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), height,
+                                        fonts[kind], color, markers[task.status], title), y))
                 y += height + gap
+            if hidden:
+                # не влезающие дела не обрезаются молча: строка «… и ещё N» (issue #1);
+                # если и ей нет места — освобождаем его, убирая последние дела колонки
+                while col_items and y + more_h > h:
+                    _, y = col_items.pop()
+                    hidden += 1
+                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), more_h,
+                                        more_font, more_color, None, f"… и ещё {hidden}"), y))
+            items.extend(item for item, _ in col_items)
         return _Layout(size, bounds, items, n_cols, self.width() / n_cols)
 
     def _current_layout(self) -> _Layout | None:
@@ -289,7 +364,9 @@ class ReminderWindow(QWidget):
             painter.setPen(item.color)
             painter.drawText(item.rect, flags, item.title)
 
-            # Визуальный статус — цветной маркер слева от названия
+            # Визуальный статус — цветной маркер слева от названия (у строки «… и ещё N» его нет)
+            if item.marker is None:
+                continue
             painter.setPen(Qt.NoPen)
             painter.setBrush(item.marker)
             painter.drawRoundedRect(QRectF(item.rect.x() - TEXT_LEFT, item.rect.y() + 4, 6, max(6, item.height - 8)), 2, 2)

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from models import TaskStatus
 
 WIDGET_HEIGHT = 44
+DELETE_BTN_SIZE = 22
 
 
 class ElidedLabel(QLabel):
@@ -129,6 +130,16 @@ class TaskWidget(QWidget):
             self.apply_urgent_style()
         layout.addWidget(self.label, 1)
 
+        # удаление в один клик (issue #1); пункт «Удалить» в меню ПКМ остаётся
+        self.del_btn = QPushButton("✕")
+        self.del_btn.setProperty("deleteBtn", True)
+        self.del_btn.setFixedSize(DELETE_BTN_SIZE, DELETE_BTN_SIZE)
+        self.del_btn.setToolTip("Удалить")
+        self.del_btn.setCursor(Qt.PointingHandCursor)
+        self.del_btn.setFocusPolicy(Qt.NoFocus)
+        self.del_btn.clicked.connect(lambda: self.list_view.delete_handler(self.task))
+        layout.addWidget(self.del_btn)
+
     def _display_title(self) -> str:
         prefix = ""
         if self.task.urgent:
@@ -204,7 +215,7 @@ class TaskWidget(QWidget):
         self._edit.setMaxLength(255)
         self._edit.setFrame(False)
         x0 = self.btn.x() + self.btn.width() + 6
-        width = max(40, self.width() - x0 - 8)
+        width = max(40, self.del_btn.x() - x0 - 6)  # поле не наезжает на крестик удаления
         self._edit.setGeometry(x0, 9, width, 26)
         self._edit.show()
         self._edit.setFocus()
