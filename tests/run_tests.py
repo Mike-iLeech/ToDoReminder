@@ -668,6 +668,96 @@ def test_review_fixes():
     check("текст релиза в UTF-8", "Автообновление" in notes.read_text(encoding="utf-8"))
 
 
+def test_update_polish():
+    print("## Обновления: напоминания и выход")
+    import updater
+    from app import AppContext, ReminderManager
+    from main_window import MainWindow
+    from update_manager import UpdateManager, _safe_emit
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    rm = ReminderManager(ctx)
+    ctx.reminders = rm
+    um = UpdateManager(ctx)
+    ctx.updates = um
+
+    # пока идёт загрузка обновления (модальный прогресс), напоминание ждёт на нуле
+    um._downloading = True
+    rm._remaining = 1
+    rm._tick()
+    rm._tick()
+    check("напоминание отложено во время загрузки", rm._reminder is None and rm._remaining == 0)
+    um._downloading = False
+    rm._tick()
+    check("после загрузки напоминание показано", rm._reminder is not None and rm._reminder.isVisible())
+    rm._reminder._hide()
+    app.processEvents()
+
+    # модальное сообщение обновления: поверх всех окон и снимает блокировку напоминаний после закрытия
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtWidgets import QMessageBox
+    seen = {}
+    orig_exec = QMessageBox.exec
+
+    def fake_exec(box):
+        seen["on_top"] = bool(box.windowFlags() & _Qt.WindowStaysOnTopHint)
+        seen["blocks"] = um.blocks_reminders
+        return 0
+
+    QMessageBox.exec = fake_exec
+    try:
+        um._message(QMessageBox.Information, "проверка")
+    finally:
+        QMessageBox.exec = orig_exec
+    check("сообщение обновления поверх всех окон", seen.get("on_top") is True)
+    check("пока сообщение открыто, напоминания отложены; после — нет",
+          seen.get("blocks") is True and not um.blocks_reminders)
+
+    # сбой запуска загрузки не оставляет флаг «идёт загрузка»
+    info = updater.ReleaseInfo("99.0", "v99.0", "", "", "https://example/a.exe", 1, None)
+    orig_can = updater.can_write_next_to
+    updater.can_write_next_to = lambda exe: True
+
+    def boom(*a):
+        raise RuntimeError("can't start new thread")
+
+    um._launch_download = boom
+    try:
+        um._start_download(info)
+        check("сбой запуска загрузки сбрасывает флаг", False)
+    except RuntimeError:
+        check("сбой запуска загрузки сбрасывает флаг", not um._downloading and not um.blocks_reminders)
+    finally:
+        updater.can_write_next_to = orig_can
+
+    # ответ проверки после выхода не открывает окон
+    um.shutdown()
+    shown = []
+    um._message = lambda *a, **k: shown.append(a)
+    um._on_checked(info, False)
+    um._on_checked(None, False)
+    um._on_check_failed("нет сети", False)
+    check("после выхода результаты проверки не показываются", not shown and um._dialog is None)
+    check("выход останавливает таймеры и загрузку",
+          not um._first.isActive() and not um._periodic.isActive() and um._cancel.is_set())
+
+    # emit в удалённый мост из рабочего потока не бросает исключение
+    import shiboken6
+    bridge = um._bridge
+    sig = bridge.checked
+    shiboken6.delete(bridge)
+    try:
+        _safe_emit(sig, None, True)
+        check("emit в удалённый мост безопасен", True)
+    except Exception as e:  # noqa: BLE001
+        check("emit в удалённый мост безопасен", False, repr(e))
+    main._quitting = True
+    main.close()
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -679,6 +769,7 @@ def main():
     test_performance_paths()
     test_updater()
     test_review_fixes()
+    test_update_polish()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")
