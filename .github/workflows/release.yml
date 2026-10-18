@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write
 
+# серия пушей в один PR не собирает EXE несколько раз; запуски по тегам не отменяются
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: windows-latest

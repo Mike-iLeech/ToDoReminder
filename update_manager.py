@@ -168,9 +168,15 @@ class UpdateManager(QObject):
     def _styled(self, widget) -> None:
         widget.setStyleSheet(build_stylesheet(self._ctx.settings_manager.s.theme))
 
+    def _on_top(self, widget) -> None:
+        # модальные окна обновления блокируют всё приложение; если под ними окажется
+        # полноэкранное напоминание «поверх всех окон», выбраться можно было бы только с клавиатуры
+        widget.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+
     def _message(self, icon, text: str, title: str = "Обновления") -> None:
         box = QMessageBox(icon, title, text)
         self._styled(box)
+        self._on_top(box)
         self._modal_messages += 1
         try:
             box.exec()
@@ -241,6 +247,7 @@ class UpdateManager(QObject):
                               f"Нет прав на запись в папку программы:\n{exe.parent}\n\n"
                               "Скачайте новую версию со страницы релиза вручную.")
             self._styled(box)
+            self._on_top(box)
             open_btn = box.addButton("Открыть страницу релиза", QMessageBox.AcceptRole)
             box.addButton(QMessageBox.Close)
             self._modal_messages += 1
@@ -253,8 +260,17 @@ class UpdateManager(QObject):
             return
         self._downloading = True
         self._cancel.clear()
+        try:
+            self._launch_download(info, exe)
+        except BaseException:
+            # флаг «идёт загрузка» блокирует и проверки, и напоминания — не оставлять его висеть
+            self._close_progress()
+            raise
+
+    def _launch_download(self, info, exe) -> None:
         dlg = QProgressDialog("Загрузка обновления…", "Отмена", 0, 100, None)
         self._styled(dlg)
+        self._on_top(dlg)
         dlg.setWindowTitle(f"Обновление до {info.version}")
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setMinimumDuration(0)

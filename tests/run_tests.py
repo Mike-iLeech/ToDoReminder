@@ -696,8 +696,44 @@ def test_update_polish():
     rm._reminder._hide()
     app.processEvents()
 
-    # ответ проверки после выхода не открывает окон
+    # модальное сообщение обновления: поверх всех окон и снимает блокировку напоминаний после закрытия
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtWidgets import QMessageBox
+    seen = {}
+    orig_exec = QMessageBox.exec
+
+    def fake_exec(box):
+        seen["on_top"] = bool(box.windowFlags() & _Qt.WindowStaysOnTopHint)
+        seen["blocks"] = um.blocks_reminders
+        return 0
+
+    QMessageBox.exec = fake_exec
+    try:
+        um._message(QMessageBox.Information, "проверка")
+    finally:
+        QMessageBox.exec = orig_exec
+    check("сообщение обновления поверх всех окон", seen.get("on_top") is True)
+    check("пока сообщение открыто, напоминания отложены; после — нет",
+          seen.get("blocks") is True and not um.blocks_reminders)
+
+    # сбой запуска загрузки не оставляет флаг «идёт загрузка»
     info = updater.ReleaseInfo("99.0", "v99.0", "", "", "https://example/a.exe", 1, None)
+    orig_can = updater.can_write_next_to
+    updater.can_write_next_to = lambda exe: True
+
+    def boom(*a):
+        raise RuntimeError("can't start new thread")
+
+    um._launch_download = boom
+    try:
+        um._start_download(info)
+        check("сбой запуска загрузки сбрасывает флаг", False)
+    except RuntimeError:
+        check("сбой запуска загрузки сбрасывает флаг", not um._downloading and not um.blocks_reminders)
+    finally:
+        updater.can_write_next_to = orig_can
+
+    # ответ проверки после выхода не открывает окон
     um.shutdown()
     shown = []
     um._message = lambda *a, **k: shown.append(a)
