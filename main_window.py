@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -138,10 +138,18 @@ def build_help_html(theme: str) -> str:
 <ul style="margin:0; padding-left:20px;">
 <li>Закрытие главного окна <b>сворачивает приложение в трей</b> — оно продолжает работать.</li>
 <li><b>ЛКМ</b> по значку в трее — вернуть окно (или ничего — по настройке).</li>
-<li><b>ПКМ</b> по значку — меню: «Открыть основное окно», «Переместить окно на основной экран», «Выход».</li>
+<li><b>ПКМ</b> по значку — меню: «Открыть основное окно», «Переместить окно на основной экран», «Проверить обновления», «Выход».</li>
 </ul>
 
-<h3 style="color:{accent}; font-size:16px; margin:14px 0 6px 0;">10. Прочее</h3>
+<h3 style="color:{accent}; font-size:16px; margin:14px 0 6px 0;">10. Обновления</h3>
+<ul style="margin:0; padding-left:20px;">
+<li>Программа сама проверяет новые версии на <b>GitHub</b> (через 20 секунд после запуска и затем каждые 6 часов). Отключается в настройках: «Проверять обновления автоматически».</li>
+<li>Когда выходит новая версия — появляется окно со списком изменений: <b>«Обновить сейчас»</b>, «Позже» или «Пропустить версию».</li>
+<li>«Обновить сейчас» скачивает новый EXE, проверяет его контрольную сумму, заменяет старый файл и перезапускает программу. Данные из папки <b>data</b> сохраняются.</li>
+<li>Проверить вручную: кнопка «Проверить сейчас» в настройках или пункт меню трея.</li>
+</ul>
+
+<h3 style="color:{accent}; font-size:16px; margin:14px 0 6px 0;">11. Прочее</h3>
 <ul style="margin:0; padding-left:20px;">
 <li>Максимум — <b>100 дел</b>.</li>
 <li>Позиция главного окна и настройки запоминаются.</li>
@@ -227,7 +235,8 @@ class MainWindow(QWidget):
         # таймер — большой по центру, поле минут с −/+ под ним
         bottom_box = QVBoxLayout()
         bottom_box.setSpacing(8)
-        self.timer_label = QLabel("00:00")
+        self._timer_text = "00:00"
+        self.timer_label = QLabel(self._timer_text)
         self.timer_label.setObjectName("timerLabel")
         self.timer_label.setAlignment(Qt.AlignCenter)
         bottom_box.addWidget(self.timer_label)
@@ -272,7 +281,6 @@ class MainWindow(QWidget):
         self.apply_theme()
         self.refresh(animate=False)
         self._restore_position()
-        QApplication.instance().installEventFilter(self)
 
     # ------------------------------------------------------------------ данные
 
@@ -417,7 +425,7 @@ class MainWindow(QWidget):
         if fmt is None:
             lower = path.lower()
             for _, code in EXPORT_FILTERS:
-                if path.endswith("." + code):
+                if lower.endswith("." + code):
                     fmt = code
                     break
         if fmt is None:
@@ -476,15 +484,10 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------ тема
 
     def apply_theme(self) -> None:
+        # setStyleSheet сам переполировывает дочерние виджеты; ручной unpolish/polish
+        # каждого потомка удваивал работу и делал смену темы многосекундной
         self._dark = self._ctx.settings_manager.s.theme == "dark"
         self.setStyleSheet(build_stylesheet(self._ctx.settings_manager.s.theme))
-        for w in self.findChildren(QWidget):
-            w.style().unpolish(w)
-            w.style().polish(w)
-            w.update()
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
         apply_titlebars(QApplication.instance(), self._dark)
         self._update_theme_btn()
 
@@ -602,18 +605,15 @@ class MainWindow(QWidget):
         super().moveEvent(event)
         self._pos_save_timer.start()
 
-    def eventFilter(self, obj, event) -> bool:
-        # клик вне переименовываемой карточки — выйти из режима переименования
-        if event.type() == QEvent.MouseButtonPress:
-            edited = self._list.active_edit_widget()
-            if edited is not None:
-                w = QApplication.widgetAt(event.globalPosition().toPoint())
-                if w is not edited and w is not edited._edit:
-                    self._list.cancel_edit()
-        return super().eventFilter(obj, event)
-
     def set_timer_text(self, text: str) -> None:
-        self.timer_label.setText(text)
+        # пока окно скрыто в трее, метку не трогаем — актуальный текст ставится при показе
+        self._timer_text = text
+        if self.isVisible():
+            self.timer_label.setText(text)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.timer_label.setText(self._timer_text)
 
     def _on_interval_changed(self, value: int) -> None:
         self._ctx.settings_manager.s.reminder_interval_seconds = value * 60

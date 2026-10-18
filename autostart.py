@@ -29,10 +29,15 @@ def set_autostart(enabled: bool) -> None:
         pass
 
 
-def is_autostart_enabled() -> bool:
+def autostart_command():
+    """Команда автозапуска из реестра или None, если автозапуск не настроен."""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_QUERY_VALUE) as key:
-            winreg.QueryValueEx(key, APP_VALUE_NAME)
-            return True
-    except (OSError, FileNotFoundError):
-        return False
+            value, _ = winreg.QueryValueEx(key, APP_VALUE_NAME)
+            return value
+    except OSError:
+        return None
+
+
+def is_autostart_enabled() -> bool:
+    return autostart_command() is not None

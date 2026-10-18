@@ -35,6 +35,7 @@ class SettingsDialog(QDialog):
         self.sm = settings_manager
         self.s: Settings = settings_manager.s
         self._preview_callback = None
+        self._update_callback = None
         self._color_refs = {}  # field -> (btn, edit, on_change)
         self.setWindowTitle("Настройки")
         self.setWindowModality(Qt.WindowModal)
@@ -112,7 +113,7 @@ class SettingsDialog(QDialog):
         from PySide6.QtGui import QFontDatabase
 
         self.font_combo = QComboBox()
-        families = QFontDatabase().families()
+        families = QFontDatabase.families()
         for fam in families:
             self.font_combo.addItem(fam)
             item_font = QFont(fam)
@@ -184,6 +185,17 @@ class SettingsDialog(QDialog):
         self.autostart_cb.setChecked(self.s.autostart)
         self.autostart_cb.toggled.connect(self._on_autostart)
         root.addWidget(self.autostart_cb)
+
+        # обновления с GitHub
+        update_row = QHBoxLayout()
+        self.auto_update_cb = QCheckBox("Проверять обновления автоматически")
+        self.auto_update_cb.setChecked(self.s.auto_update_check)
+        self.auto_update_cb.toggled.connect(self._on_auto_update)
+        check_btn = QPushButton("Проверить сейчас")
+        check_btn.clicked.connect(self._on_check_updates)
+        update_row.addWidget(self.auto_update_cb, 1)
+        update_row.addWidget(check_btn)
+        root.addLayout(update_row)
 
         # поведение по клику в трее
         self.tray_combo = QComboBox()
@@ -378,11 +390,22 @@ class SettingsDialog(QDialog):
         self.s.tray_action_index = index
         self.sm.save()
 
+    def _on_auto_update(self, checked: bool) -> None:
+        self.s.auto_update_check = checked
+        self.sm.save()
+
+    def _on_check_updates(self) -> None:
+        if self._update_callback is not None:
+            self._update_callback()
+
     def _on_preview(self) -> None:
         self._preview_callback()
 
     def set_preview_callback(self, callback) -> None:
         self._preview_callback = callback
+
+    def set_update_callback(self, callback) -> None:
+        self._update_callback = callback
 
     def _select_monitor(self, name: str) -> None:
         if not name:
@@ -406,7 +429,11 @@ class SettingsDialog(QDialog):
         )
         if answer != QMessageBox.Yes:
             return
+        # служебная дата ежедневного сброса — не пользовательская настройка: если её обнулить,
+        # ежедневная проверка посреди дня удалит Done и сбросит регулярные задачи
+        reset_date = self.s.regular_reset_date
         self.s = Settings()
+        self.s.regular_reset_date = reset_date
         self.sm.s = self.s
         self.sm.save()
         self._apply_defaults_to_ui()
@@ -428,6 +455,7 @@ class SettingsDialog(QDialog):
             self.urgent_style_combo,
             self.opacity_slider,
             self.autostart_cb,
+            self.auto_update_cb,
             self.tray_combo,
         ]
         for w in widgets:
@@ -448,6 +476,7 @@ class SettingsDialog(QDialog):
             self.opacity_slider.setValue(s.opacity_percent)
             self.opacity_label.setText(f"{s.opacity_percent}%")
             self.autostart_cb.setChecked(s.autostart)
+            self.auto_update_cb.setChecked(s.auto_update_check)
             self.tray_combo.setCurrentIndex(s.tray_action_index)
         finally:
             for w in widgets:

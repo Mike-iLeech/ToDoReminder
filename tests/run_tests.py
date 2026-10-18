@@ -19,6 +19,10 @@ from PySide6.QtWidgets import QApplication
 
 import settings as S
 import models
+
+# тесты не должны трогать автозапуск в реестре разработчика
+S.set_autostart = lambda enabled: None
+S.autostart_command = lambda: None
 from drag_manager import STEP
 from models import TaskLimitError, TaskStatus, TaskStore
 
@@ -368,7 +372,7 @@ def test_window():
     # сохранить/восстановить позицию
     main.move(123, 45)
     main._save_position()
-    ctx.settings_manager.save()
+    ctx.settings_manager.flush()
     ctx2 = AppContext(app)
     check("положение окна сохраняется",
           ctx2.settings_manager.s.window_x == 123 and ctx2.settings_manager.s.window_y == 45)
@@ -409,6 +413,261 @@ def test_fullscreen_render():
     empty.close()
 
 
+def test_performance_paths():
+    print("## Производительность: переиспользование и кэши")
+    from app import AppContext
+    from main_window import MainWindow
+    from reminder_window import ReminderWindow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    ctx.store.tasks.clear()
+    for i in range(10):
+        ctx.store.add(f"П{i}")
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    w = main._list
+
+    before = {wd.task.id: wd for wd in w._widgets}
+    target = ctx.store.tasks[3]
+    main._on_status_cycle(target)
+    after = {wd.task.id: wd for wd in w._widgets}
+    reused = sum(1 for tid, wd in after.items() if before.get(tid) is wd and tid != target.id)
+    check("карточки неизменившихся задач переиспользуются", reused == 9, f"reused={reused}")
+    check("изменившаяся карточка пересоздана", after[target.id] is not before[target.id])
+    check("порядок карточек = порядок задач", [wd.task.id for wd in w._widgets] == [t.id for t in ctx.store.tasks])
+
+    ctx.store.remove(0)
+    main.refresh(animate=False)
+    check("удалённая задача убрана из списка", len(w._widgets) == len(ctx.store.tasks))
+
+    # фильтр «клик вне поля» живёт только во время переименования
+    w._widgets[0].start_edit()
+    check("фильтр кликов включён при переименовании", w._click_filter_active)
+    w._widgets[0]._cancel_edit()
+    check("фильтр кликов снят после переименования", not w._click_filter_active)
+
+    # отложенная запись настроек
+    sm = ctx.settings_manager
+    sm.flush()
+    mtime = S.SETTINGS_PATH.stat().st_mtime_ns
+    sm.s.opacity_percent = 37
+    sm.save()
+    check("save() не пишет на диск сразу", S.SETTINGS_PATH.stat().st_mtime_ns == mtime and sm._save_timer.isActive())
+    sm.flush()
+    import json as _json
+    check("flush() записывает настройки", _json.loads(S.SETTINGS_PATH.read_text(encoding="utf-8"))["opacity_percent"] == 37)
+    sm.s.opacity_percent = 0
+    sm.flush()
+
+    # кэш раскладки полноэкранного окна
+    win = ReminderWindow(sm.s, ctx.store.tasks)
+    win.resize(1200, 800)
+    calls = []
+    orig = win._compute_layout
+    win._compute_layout = lambda: (calls.append(1), orig())[1]
+    win.grab()
+    win.grab()
+    check("раскладка считается один раз на два кадра", len(calls) == 1, f"calls={len(calls)}")
+    win.set_tasks(ctx.store.tasks[:3])
+    win.grab()
+    check("смена задач пересчитывает раскладку", len(calls) == 2)
+    sm.s.text_size += 2
+    win.grab()
+    check("смена настроек пересчитывает раскладку", len(calls) == 3)
+    sm.s.text_size -= 2
+    win.close()
+    main._quitting = True
+    main.close()
+
+
+def test_updater():
+    print("## Автообновление")
+    import hashlib
+    import updater
+
+    check("разбор версии", updater.parse_version("v2.6.3.2") == (2, 6, 3, 2))
+    check("хвостовые нули не важны", updater.parse_version("2.7") == updater.parse_version("v2.7.0.0"))
+    check("новее", updater.is_newer("v2.7.0.0", "2.6.3.2") and updater.is_newer("2.6.10", "2.6.9"))
+    check("не новее", not updater.is_newer("v2.6.3.2", "2.6.3.2") and not updater.is_newer("2.6.3.1", "2.6.3.2"))
+
+    release = {
+        "tag_name": "v2.7.0.0",
+        "body": "## Что нового",
+        "html_url": "https://example/rel",
+        "assets": [
+            {"name": "notes.txt", "browser_download_url": "https://example/notes.txt", "size": 1},
+            {"name": "ToDoReminder.exe", "browser_download_url": "https://example/app.exe", "size": 5,
+             "digest": "sha256:ABCDEF"},
+        ],
+    }
+    info = updater.parse_release(release)
+    check("выбран EXE-ассет", info is not None and info.asset_url.endswith("app.exe"))
+    check("версия и SHA-256 из релиза", info.version == "2.7.0.0" and info.sha256 == "abcdef")
+    check("релиз без EXE пропускается", updater.parse_release({"tag_name": "v9", "assets": []}) is None)
+
+    d = Path(tempfile.mkdtemp())
+    payload = b"new exe payload" * 1000
+    src = d / "remote.exe"
+    src.write_bytes(payload)
+    good = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), hashlib.sha256(payload).hexdigest())
+    got = updater.download(good, d / "dl.exe")
+    check("загрузка с проверкой SHA-256", got.read_bytes() == payload)
+
+    bad = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), "0" * 64)
+    try:
+        updater.download(bad, d / "bad.exe")
+        check("неверная контрольная сумма отклоняется", False)
+    except updater.UpdateError:
+        check("неверная контрольная сумма отклоняется",
+              not (d / "bad.exe").exists() and not (d / "bad.exe.part").exists())
+
+    try:
+        updater.download(good, d / "cancel.exe", cancelled=lambda: True)
+        check("отмена загрузки", False)
+    except updater.UpdateCancelled:
+        check("отмена загрузки", not (d / "cancel.exe").exists())
+
+    exe = d / "ToDoReminder.exe"
+    exe.write_bytes(b"old")
+    new = d / "ToDoReminder.exe.new"
+    new.write_bytes(b"new")
+    updater.swap_executables(exe, new)
+    check("подмена EXE", exe.read_bytes() == b"new" and updater.old_exe_path(exe).read_bytes() == b"old"
+          and not new.exists())
+
+    os.environ["_PYI_APPLICATION_HOME_DIR"] = "x"
+    env = updater.clean_child_env()
+    del os.environ["_PYI_APPLICATION_HOME_DIR"]
+    check("служебные переменные PyInstaller сброшены",
+          "_PYI_APPLICATION_HOME_DIR" not in env and env.get("PYINSTALLER_RESET_ENVIRONMENT") == "1")
+
+
+def test_review_fixes():
+    print("## Исправления по ревью")
+    import hashlib
+    import updater
+    from PySide6.QtWidgets import QMessageBox
+    from app import AppContext
+    from main_window import MainWindow
+    from settings_window import SettingsDialog
+    from update_manager import UpdateManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    um = UpdateManager(ctx)
+    ctx.updates = um
+
+    # окно новой версии не должно блокироваться открытыми «Настройками» (WindowModal)
+    dlg = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+    dlg.show()
+    app.processEvents()
+    info = updater.ReleaseInfo("99.0", "v99.0", "", "https://example/rel", "https://example/a.exe", 1, None)
+    from PySide6.QtCore import QEvent, QObject
+
+    class BlockSpy(QObject):
+        blocked = False
+
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.WindowBlocked:
+                BlockSpy.blocked = True
+            return False
+
+    spy = BlockSpy()
+    app.installEventFilter(spy)
+    um._on_checked(info, False)
+    app.processEvents()
+    offer = um._dialog
+    app.removeEventFilter(spy)
+    check("окно обновления не заблокировано настройками",
+          offer is not None and offer.parentWidget() is None and not BlockSpy.blocked,
+          f"blocked={BlockSpy.blocked}")
+    # фоновая проверка не пересоздаёт уже открытое окно той же версии
+    um._on_checked(info, True)
+    check("фоновая проверка не пересоздаёт окно", um._dialog is offer)
+    dlg.close()
+    dlg.deleteLater()
+    app.processEvents()
+    check("закрытие настроек не уничтожает окно обновления", um._dialog is offer and offer.isVisible())
+
+    # повторная ручная проверка: destroyed старого окна не обнуляет ссылку на новое
+    um._on_checked(info, False)
+    second = um._dialog
+    from PySide6.QtCore import QCoreApplication
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    check("ссылка на текущее окно переживает удаление прежнего", um._dialog is second and second is not offer)
+    um._on_checked(info, True)
+    check("после этого фоновая проверка не плодит окна", um._dialog is second)
+    second.close()
+    app.processEvents()
+
+    # результат проверки во время загрузки не открывает окон
+    um._downloading = True
+    um._on_checked(info, False)
+    check("во время загрузки предложение не показывается", um._dialog is None)
+    um._downloading = False
+
+    # отмена, пришедшая после последнего чанка, не ставит обновление
+    d = Path(tempfile.mkdtemp())
+    new = d / "x.new"
+    new.write_bytes(b"x")
+    installed = []
+    orig_install = updater.install_and_restart
+    updater.install_and_restart = lambda *a, **k: installed.append(a)
+    try:
+        um._cancel.set()
+        um._on_downloaded(new)
+    finally:
+        updater.install_and_restart = orig_install
+    check("отмена после загрузки не устанавливает", not installed and not new.exists())
+
+    # без digest и без размера скачанный файл проверить нельзя — отказ
+    payload = b"abc"
+    src = d / "r.exe"
+    src.write_bytes(payload)
+    blind = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), 0, None)
+    try:
+        updater.download(blind, d / "blind.exe")
+        check("без размера и SHA-256 загрузка отклоняется", False)
+    except updater.UpdateError:
+        check("без размера и SHA-256 загрузка отклоняется", not (d / "blind.exe").exists())
+    sized = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), hashlib.sha256(payload).hexdigest())
+    check("с размером и SHA-256 загрузка проходит", updater.download(sized, d / "ok.exe").read_bytes() == payload)
+
+    # сброс настроек сохраняет служебную дату ежедневного сброса
+    ctx.settings_manager.s.regular_reset_date = "2026-10-18"
+    dlg2 = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+    orig_q = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        dlg2._reset_defaults()
+    finally:
+        QMessageBox.question = orig_q
+    check("сброс настроек не обнуляет дату ежедневного сброса",
+          ctx.settings_manager.s.regular_reset_date == "2026-10-18")
+    dlg2.close()
+
+    # выход после обновления не пишет настройки повторно
+    ctx.settings_manager.flush()
+    mtime = S.SETTINGS_PATH.stat().st_mtime_ns
+    ctx.settings_manager.s.opacity_percent = 55
+    ctx.quit(save=False)
+    ctx.settings_manager.flush()
+    check("quit(save=False) не трогает файл настроек", S.SETTINGS_PATH.stat().st_mtime_ns == mtime)
+
+    # текст релиза пишется в UTF-8 напрямую
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    notes = d / "notes.md"
+    subprocess.run([sys.executable, str(root / "tools" / "release_notes.py"), "v2.7.0.0", str(notes)], check=True)
+    check("текст релиза в UTF-8", "Автообновление" in notes.read_text(encoding="utf-8"))
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -417,6 +676,9 @@ def main():
     test_reminders()
     test_window()
     test_fullscreen_render()
+    test_performance_paths()
+    test_updater()
+    test_review_fixes()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")

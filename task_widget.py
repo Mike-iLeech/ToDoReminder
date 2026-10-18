@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -36,30 +36,53 @@ class ElidedLabel(QLabel):
 
 
 class StatusButton(QPushButton):
+    """Цветная плашка статуса. Рисуется вручную: собственный stylesheet у каждой
+    из сотни кнопок делал пересборку списка и смену темы очень медленными."""
+
     reverseRequested = Signal()
+
+    PAD_X = 6
+    RADIUS = 4
 
     def __init__(self):
         super().__init__()
         self.setFixedHeight(24)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
-        self.setStyleSheet(
-            """
-            QPushButton {
-                color: white; font-weight: 600; border: none; border-radius: 4px;
-                padding: 0 6px; font-size: 11px;
-            }
-            QPushButton:hover { opacity: 0.9; }
-            """
-        )
+        self._color = QColor()
+
+    def _label_font(self) -> QFont:
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setWeight(QFont.DemiBold)
+        return font
 
     def refresh(self, task, colors=None) -> None:
-        color = colors.get(task.status) if colors else task.status.color
-        self.setText(task.status.value)
-        self.setStyleSheet(
-            "QPushButton { color: white; font-weight: 600; border: none; border-radius: 4px;"
-            " background-color: " + color + "; padding: 0 6px; font-size: 11px; }"
-        )
+        color = QColor(colors.get(task.status) if colors else task.status.color)
+        text = task.status.value
+        if text == self.text() and color == self._color:
+            return
+        self._color = color
+        self.setText(text)
+        self.updateGeometry()
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        fm = QFontMetrics(self._label_font())
+        return QSize(fm.horizontalAdvance(self.text()) + 2 * self.PAD_X, 24)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(QRectF(self.rect()), self.RADIUS, self.RADIUS)
+        painter.setPen(QColor("white"))
+        painter.setFont(self._label_font())
+        painter.drawText(self.rect(), Qt.AlignCenter, self.text())
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.RightButton:
@@ -188,6 +211,7 @@ class TaskWidget(QWidget):
         self._edit.selectAll()
         self._edit.installEventFilter(self)
         self._edit.returnPressed.connect(self._commit_edit)
+        self.list_view.edit_started()
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self._edit and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
@@ -217,3 +241,4 @@ class TaskWidget(QWidget):
         self._edit.deleteLater()
         self._edit = None
         self.label.setText(self._display_title())
+        self.list_view.edit_finished()

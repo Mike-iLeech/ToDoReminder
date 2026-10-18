@@ -1,11 +1,13 @@
 import struct
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QIODevice, QPoint, Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
-OUT = r"H:\Разработка Приложений\ToDoReminder_Version4\resources\icon.ico"
+OUT = Path(__file__).resolve().parent.parent / "resources" / "icon.ico"
+OUT.parent.mkdir(parents=True, exist_ok=True)
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 
 app = QApplication(sys.argv)
