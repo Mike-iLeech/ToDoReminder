@@ -49,6 +49,7 @@ class Settings:
     fullscreen_columns_todo: int = 2            # число колонок для задач To Do в полноэкранном уведомлении
     fullscreen_columns_started: int = 2         # число колонок для задач Started в полноэкранном уведомлении
     fullscreen_columns_done: int = 2            # число колонок для задач Done в полноэкранном уведомлении
+    auto_remove_done: bool = True               # удалять Done в начале нового дня и при запуске
     auto_update_check: bool = True              # проверять обновления на GitHub автоматически
     update_skip_version: str = ""               # версия, которую пользователь попросил не предлагать
 

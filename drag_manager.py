@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
@@ -84,6 +86,8 @@ class TaskListWidget(QWidget):
         self._app_filter_active = False
         self._click_filter = _OutsideClickFilter(self)
         self._click_filter_active = False
+        self._deleted_at = float("-inf")
+        self._deleted_pos = QPoint()
 
     # ------------------------------------------------------------------ API
 
@@ -108,6 +112,25 @@ class TaskListWidget(QWidget):
         for w in self._widgets:
             if w is not except_widget and w._edit is not None:
                 w.commit_edit()
+
+    def request_delete(self, task) -> None:
+        """Удаление крестиком. После удаления под курсор подъезжает соседняя карточка, и второй
+        щелчок двойного клика удалил бы и её — поэтому в пределах интервала двойного щелчка
+        повторное удаление (и переименование двойным кликом) игнорируется."""
+        if self.recently_deleted():
+            return
+        self._deleted_at = time.monotonic()
+        self._deleted_pos = QCursor.pos()
+        if self.delete_handler is not None:
+            self.delete_handler(task)
+
+    def recently_deleted(self) -> bool:
+        """Щелчок пришёл в интервале двойного щелчка и почти в ту же точку, что и удаление.
+        Намеренный щелчок по другой карточке (в другом месте) не блокируется."""
+        if time.monotonic() - self._deleted_at >= QApplication.doubleClickInterval() / 1000:
+            return False
+        moved = (QCursor.pos() - self._deleted_pos).manhattanLength()
+        return moved <= QApplication.startDragDistance()
 
     def edit_started(self) -> None:
         if not self._click_filter_active:

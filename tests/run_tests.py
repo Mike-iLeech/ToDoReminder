@@ -758,6 +758,253 @@ def test_update_polish():
     main.close()
 
 
+def test_issue_1():
+    print("## Issue #1: автоудаление, крестик, переполнение напоминания")
+    from app import AppContext
+    from main_window import MainWindow
+    from models import Task
+    from reminder_window import ReminderWindow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # 1. автоудаление выполненных — настраивается
+    ctx = AppContext(app)
+    ctx.store.tasks.clear()
+    ctx.store.add("готовое")
+    ctx.store.add("регулярное")
+    ctx.store.set_status(0, TaskStatus.DONE)
+    ctx.store.set_regular(ctx.store.tasks.index(next(t for t in ctx.store.tasks if t.title == "регулярное")), True)
+    for t in ctx.store.tasks:
+        t.status = TaskStatus.DONE
+    s = ctx.settings_manager.s
+    s.auto_remove_done = False
+    ctx._startup_cleanup()
+    s.regular_reset_date = "2000-01-01"
+    ctx._daily_check()
+    titles = {t.title: t.status for t in ctx.store.tasks}
+    check("выключено: Done не удаляются ни при запуске, ни в новый день", titles.get("готовое") is TaskStatus.DONE)
+    check("выключено: регулярные всё равно сбрасываются в To Do", titles.get("регулярное") is TaskStatus.TO_DO)
+    s.auto_remove_done = True
+    s.regular_reset_date = "2000-01-01"
+    ctx._daily_check()
+    check("включено: Done удаляются в новый день", [t.title for t in ctx.store.tasks] == ["регулярное"])
+    ctx.store.tasks[0].status = TaskStatus.DONE
+    ctx._startup_cleanup()
+    check("включено: Done удаляются при запуске", not ctx.store.tasks)
+
+    # 2. крестик удаления на карточке
+    ctx.store.add("удали меня")
+    ctx.store.add("останься")
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    app.processEvents()
+    w = main._list.widget_by_task(next(t for t in ctx.store.tasks if t.title == "удали меня"))
+    check("у карточки есть крестик", w is not None and w.del_btn.isVisible())
+    w.del_btn.click()
+    app.processEvents()
+    check("крестик удаляет задачу", [t.title for t in ctx.store.tasks] == ["останься"])
+    w2 = main._list._widgets[0]
+    w2.start_edit()
+    check("поле переименования не наезжает на крестик",
+          w2._edit.geometry().right() < w2.del_btn.geometry().left())
+    w2._cancel_edit()
+
+    # двойной щелчок по крестику: второй щелчок приходится на подъехавшую карточку
+    import time as _time
+    from PySide6.QtCore import QEvent as _QEvent, QPointF as _QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import Qt
+    ctx.store.tasks.clear()
+    for i in range(4):
+        ctx.store.add(f"task{i}")
+    main.refresh(animate=False)
+    lst = main._list
+    lst._deleted_at = _time.monotonic() - 10  # предыдущая проверка удаляла только что
+    first = lst._widgets[0]
+    gpos = first.del_btn.mapToGlobal(first.del_btn.rect().center())
+    first.del_btn.click()
+    for _ in range(10):
+        lst._tick()
+    app.processEvents()
+    under = lst._widgets[0]
+    local = _QPointF(under.del_btn.mapFromGlobal(gpos))
+    for et in (_QEvent.MouseButtonDblClick, _QEvent.MouseButtonRelease):
+        ev = QMouseEvent(et, local, _QPointF(gpos), Qt.LeftButton,
+                         Qt.LeftButton if et != _QEvent.MouseButtonRelease else Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(under.del_btn, ev)
+    under.del_btn.click()  # даже «честный» второй click в интервале двойного щелчка
+    app.processEvents()
+    check("двойной щелчок по крестику удаляет одно дело", len(ctx.store.tasks) == 3, str([t.title for t in ctx.store.tasks]))
+    ev = QMouseEvent(_QEvent.MouseButtonDblClick, _QPointF(5, 5), _QPointF(5, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(lst._widgets[0], ev)
+    check("двойной клик сразу после удаления не открывает переименование", lst.active_edit_widget() is None)
+    lst._deleted_at = _time.monotonic() - 10
+    lst._widgets[0].del_btn.click()
+    app.processEvents()
+    check("после интервала крестик снова удаляет", len(ctx.store.tasks) == 2)
+    # быстрый щелчок по крестику в другом месте (другая карточка) — намеренный, не блокируется
+    from PySide6.QtCore import QPoint as _QPoint
+    from PySide6.QtGui import QCursor
+    lst._deleted_pos = QCursor.pos() + _QPoint(0, 200)
+    lst._widgets[0].del_btn.click()
+    app.processEvents()
+    check("быстрый щелчок в другом месте удаляет", len(ctx.store.tasks) == 1)
+    main._quitting = True
+    main.close()
+
+    # 3. переполнение полноэкранного напоминания
+    def mk(n, status, title="Дело с описанием средней длины"):
+        out = []
+        for i in range(n):
+            t = Task.create(f"{title} {i}")
+            t.status = status
+            t.position = i
+            out.append(t)
+        return out
+
+    def layout(tasks, **over):
+        st = S.Settings()
+        st.text_size = 32
+        st.fullscreen_min_font_size = 14
+        for k, v in over.items():
+            setattr(st, k, v)
+        win = ReminderWindow(st, tasks)
+        win.resize(1600, 900)
+        lay = win._current_layout()
+        cols = lay.n_cols
+        more = [i.title for i in lay.items if i.marker is None and i.title.startswith("…")]
+        layout.notes = [i.title for i in lay.items if i.marker is None and i.title.startswith("Скрыто")]
+        shown = sum(1 for i in lay.items if i.marker is not None)
+        win.close()
+        return cols, more, shown
+
+    few = mk(6, TaskStatus.TO_DO)
+    cols, more, shown = layout(few)
+    check("влезает — раскладка как настроена (2+2)", cols == 4 and not more and shown == 6)
+
+    # Done занимает место: при нехватке выполненные скрываются, активные — все на экране
+    active = mk(40, TaskStatus.TO_DO) + mk(40, TaskStatus.STARTED)
+    done = mk(60, TaskStatus.DONE)
+    cols, more, shown = layout(active + done, show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
+    check("при нехватке места Done скрываются, активные все видны", not more and shown == 80, f"cols={cols} more={more} shown={shown}")
+    check("о скрытых Done есть пометка", layout.notes == ["Скрыто выполненных: 60"], str(layout.notes))
+
+    # одни Done и не влезают — не пустой экран, а «… и ещё N»
+    cols, more, shown = layout(mk(300, TaskStatus.DONE), show_done_in_fullscreen=True)
+    hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
+    check("одни Done: экран не пустой", shown > 0 and shown + hidden == 300, f"shown={shown} hidden={hidden}")
+
+    # единственное дело выше экрана (срочное со ссылками) всё равно на экране, а не «… и ещё 1»
+    url = "https://example.com/very/long/link/path/to/document"
+    big = Task.create(f"позвонить в бухгалтерию {url} согласовать договор аренды {url} оборудования {url}")
+    big.urgent = True
+    st = S.Settings()
+    st.text_size = 20
+    st.urgent_fullscreen_size_delta = 6
+    st.fullscreen_columns_todo, st.fullscreen_columns_started, st.fullscreen_columns_done = 2, 4, 1
+    win = ReminderWindow(st, [big])
+    win.resize(1024, 600)
+    lay = win._current_layout()
+    titles = [i.title for i in lay.items]
+    check("единственное длинное дело видно", any(t.startswith("⚡") for t in titles) and not any(t.startswith("…") for t in titles),
+          str(titles)[:120])
+    check("колонки не добавляются статусу с одним делом", lay.n_cols == 6, f"cols={lay.n_cols}")
+    win.close()
+
+    # высокое первое дело с делами под ним: обрезается, под ним «… и ещё N» в пределах экрана
+    # (30 огромных дел: даже 12 колонок не спасают, в каждой — обрезанное первое дело и «… и ещё N»)
+    huge = []
+    for i in range(30):
+        t = Task.create(f"{i} " + " ".join(["очень длинное описание дела"] * 60))
+        t.position = i
+        huge.append(t)
+    st = S.Settings()
+    st.text_size = 48
+    st.fullscreen_columns_todo, st.fullscreen_columns_started = 1, 1
+    win = ReminderWindow(st, huge)
+    win.resize(800, 600)
+    lay = win._current_layout()
+    shown = [i for i in lay.items if i.marker is not None]
+    more = [i for i in lay.items if i.title.startswith("…")]
+    hidden = sum(int(m.title.rsplit(" ", 1)[1]) for m in more)
+    clipped = all(i.rect.height() == i.height < 600 for i in shown)
+    more_ok = more and all(m.rect.y() + m.height <= 600 for m in more) and all(
+        any(m.rect.x() == s.rect.x() and m.rect.y() >= s.rect.y() + s.height for s in shown) for m in more)
+    check("высокое первое дело обрезано по видимой области", shown and clipped,
+          str([(i.rect.height(), i.height) for i in shown][:3]))
+    check("под обрезанным делом «… и ещё N» в пределах экрана", bool(more_ok) and len(shown) + hidden == 30,
+          f"shown={len(shown)} hidden={hidden}")
+    win.close()
+
+    # пометка о скрытых Done не теряется ни при переполнении, ни когда активные легли впритык
+    def note_case(w, h, text_size, n_todo, n_started, n_done):
+        st = S.Settings()
+        st.text_size = text_size
+        st.fullscreen_min_font_size = 14
+        st.show_done_in_fullscreen = True
+        st.fullscreen_columns_todo = st.fullscreen_columns_started = st.fullscreen_columns_done = 1
+        win = ReminderWindow(st, mk(n_todo, TaskStatus.TO_DO) + mk(n_started, TaskStatus.STARTED) + mk(n_done, TaskStatus.DONE))
+        win.resize(w, h)
+        lay = win._current_layout()
+        notes = [i for i in lay.items if i.marker is None and i.title.startswith("Скрыто")]
+        bottom = max(i.rect.y() + i.height for i in lay.items)
+        win.close()
+        return notes, bottom
+
+    notes, bottom = note_case(1600, 900, 72, 70, 70, 40)
+    check("пометка о Done при переполнении", len(notes) == 1 and bottom <= 900, f"notes={len(notes)} bottom={bottom}")
+    bad_heights = []
+    for hh in (524, 545, 546, 565, 566, 567):
+        notes, bottom = note_case(1200, hh, 20, 20, 20, 80)
+        if len(notes) != 1 or bottom > hh:
+            bad_heights.append(hh)
+    check("пометка о Done, когда активные легли впритык", not bad_heights, str(bad_heights))
+
+    # Done возвращаются, если после добавления колонок для активных им хватает места
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(3, TaskStatus.DONE), show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
+    check("Done возвращаются в свободную колонку", shown == 63 and not more and not layout.notes,
+          f"cols={cols} shown={shown} more={more} notes={layout.notes}")
+
+    # не влезает в 1+1 колонку — колонки добавляются
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(10, TaskStatus.STARTED),
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1)
+    check("при нехватке места добавляются колонки", cols > 2 and not more and shown == 70, f"cols={cols} more={more}")
+    check("колонок не больше 12", cols <= 12)
+
+    # не влезает никак — «… и ещё N», ничего не теряется молча
+    many = mk(100, TaskStatus.TO_DO, "Дело номер с очень длинным описанием, которое переносится на несколько строк подряд")
+    cols, more, shown = layout(many)
+    hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
+    check("если не влезает — строка «… и ещё N»", bool(more))
+    check("показанные + скрытые = все дела", shown + hidden == 100, f"shown={shown} hidden={hidden}")
+
+    # одно слишком длинное слово не прячет Done, если по высоте место есть
+    url = mk(1, TaskStatus.TO_DO, "https://example.com/" + "a" * 120)
+    cols, more, shown = layout(mk(3, TaskStatus.TO_DO) + mk(3, TaskStatus.DONE) + url, show_done_in_fullscreen=True)
+    check("длинное слово не скрывает Done", shown == 7 and not more, f"shown={shown} more={more}")
+
+    # «показывать Done» без Done-дел не съедает лимит колонок
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(10, TaskStatus.STARTED), show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=8)
+    check("пустой Done не съедает лимит колонок", cols > 2 and not more, f"cols={cols} more={more}")
+
+    # «… и ещё N» в узкой колонке не вылезает за нижний край
+    st = S.Settings()
+    st.text_size = 14
+    st.fullscreen_min_font_size = 14
+    st.fullscreen_columns_todo = 8
+    st.fullscreen_columns_started = 4
+    win = ReminderWindow(st, mk(400, TaskStatus.TO_DO, "Дело с текстом") + mk(200, TaskStatus.STARTED, "Дело с текстом"))
+    win.resize(1600, 900)
+    lay = win._current_layout()
+    bottom = max(i.rect.y() + i.height for i in lay.items)
+    check("строка «… и ещё N» не вылезает за экран", bottom <= 900, f"bottom={bottom}")
+    win.close()
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -770,6 +1017,7 @@ def main():
     test_updater()
     test_review_fixes()
     test_update_polish()
+    test_issue_1()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")
