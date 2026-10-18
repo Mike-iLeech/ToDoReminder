@@ -170,7 +170,8 @@ class AppContext:
         if stored == today:
             return
         changed = self.store.reset_regular_to_todo()
-        removed = self.store.remove_done()
+        # регулярные уже сброшены в To Do выше, так что удаляются только разовые Done
+        removed = self.store.remove_done() if self.settings_manager.s.auto_remove_done else 0
         self.settings_manager.s.regular_reset_date = today
         self.settings_manager.save()
         if changed or removed:
@@ -180,7 +181,9 @@ class AppContext:
         self.show_list_win = None
 
     def _startup_cleanup(self) -> None:
-        """При запуске приложения удаляет все Done-задачи."""
+        """При запуске приложения удаляет все Done-задачи (если это не выключено в настройках)."""
+        if not self.settings_manager.s.auto_remove_done:
+            return
         removed = self.store.remove_done()
         if removed:
             self.save_data()

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from models import TaskStatus
 
 WIDGET_HEIGHT = 44
+DELETE_BTN_SIZE = 22
 
 
 class ElidedLabel(QLabel):
@@ -92,6 +93,13 @@ class StatusButton(QPushButton):
         super().mousePressEvent(event)
 
 
+class DeleteButton(QPushButton):
+    """Крестик удаления. Двойной щелчок по нему не считается вторым нажатием."""
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        event.accept()
+
+
 class TaskWidget(QWidget):
     """Одна задача в списке: кнопка статуса + название. Передвигается через список-родитель."""
 
@@ -128,6 +136,16 @@ class TaskWidget(QWidget):
         if task.urgent:
             self.apply_urgent_style()
         layout.addWidget(self.label, 1)
+
+        # удаление в один клик (issue #1); пункт «Удалить» в меню ПКМ остаётся
+        self.del_btn = DeleteButton("✕")
+        self.del_btn.setProperty("deleteBtn", True)
+        self.del_btn.setFixedSize(DELETE_BTN_SIZE, DELETE_BTN_SIZE)
+        self.del_btn.setToolTip("Удалить")
+        self.del_btn.setCursor(Qt.PointingHandCursor)
+        self.del_btn.setFocusPolicy(Qt.NoFocus)
+        self.del_btn.clicked.connect(lambda: self.list_view.request_delete(self.task))
+        layout.addWidget(self.del_btn)
 
     def _display_title(self) -> str:
         prefix = ""
@@ -166,7 +184,8 @@ class TaskWidget(QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
+        # второй щелчок двойного клика по крестику, пришедший уже на подъехавшую карточку
+        if event.button() == Qt.LeftButton and not self.list_view.recently_deleted():
             self.beginEditRequested.emit(self.task)
         event.accept()
 
@@ -204,7 +223,7 @@ class TaskWidget(QWidget):
         self._edit.setMaxLength(255)
         self._edit.setFrame(False)
         x0 = self.btn.x() + self.btn.width() + 6
-        width = max(40, self.width() - x0 - 8)
+        width = max(40, self.del_btn.x() - x0 - 6)  # поле не наезжает на крестик удаления
         self._edit.setGeometry(x0, 9, width, 26)
         self._edit.show()
         self._edit.setFocus()
