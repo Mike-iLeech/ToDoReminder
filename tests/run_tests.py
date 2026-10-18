@@ -896,6 +896,30 @@ def test_issue_1():
     hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
     check("одни Done: экран не пустой", shown > 0 and shown + hidden == 300, f"shown={shown} hidden={hidden}")
 
+    # пометка о скрытых Done не теряется ни при переполнении, ни когда активные легли впритык
+    def note_case(w, h, text_size, n_todo, n_started, n_done):
+        st = S.Settings()
+        st.text_size = text_size
+        st.fullscreen_min_font_size = 14
+        st.show_done_in_fullscreen = True
+        st.fullscreen_columns_todo = st.fullscreen_columns_started = st.fullscreen_columns_done = 1
+        win = ReminderWindow(st, mk(n_todo, TaskStatus.TO_DO) + mk(n_started, TaskStatus.STARTED) + mk(n_done, TaskStatus.DONE))
+        win.resize(w, h)
+        lay = win._current_layout()
+        notes = [i for i in lay.items if i.marker is None and i.title.startswith("Скрыто")]
+        bottom = max(i.rect.y() + i.height for i in lay.items)
+        win.close()
+        return notes, bottom
+
+    notes, bottom = note_case(1600, 900, 72, 70, 70, 40)
+    check("пометка о Done при переполнении", len(notes) == 1 and bottom <= 900, f"notes={len(notes)} bottom={bottom}")
+    bad_heights = []
+    for hh in (524, 545, 546, 565, 566, 567):
+        notes, bottom = note_case(1200, hh, 20, 20, 20, 80)
+        if len(notes) != 1 or bottom > hh:
+            bad_heights.append(hh)
+    check("пометка о Done, когда активные легли впритык", not bad_heights, str(bad_heights))
+
     # Done возвращаются, если после добавления колонок для активных им хватает места
     cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(3, TaskStatus.DONE), show_done_in_fullscreen=True,
                                fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=1)
