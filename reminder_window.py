@@ -189,44 +189,76 @@ class ReminderWindow(QWidget):
         Сначала шрифт уменьшается до минимального (как раньше). Если дела не влезают и так
         (issue #1), то по очереди: скрываются выполненные, затем статусам с самыми длинными
         колонками добавляются колонки (всего не больше MAX_TOTAL_COLUMNS). Если не помогло
-        и это — остаётся исходная раскладка, а не влезающие дела сворачиваются в «… и ещё N».
+        и это — берётся вариант, скрывающий меньше всего активных дел, а не влезающие дела
+        сворачиваются в «… и ещё N».
+
+        Эскалация запускается только нехваткой ВЫСОТЫ: слишком длинное слово (ссылка и т.п.)
+        лишь уменьшает шрифт, как и раньше, — лишние колонки его только сужают.
         """
         s = self._settings
         counts = self._configured_counts()
-        include_done = s.show_done_in_fullscreen
+        done_tasks = self._by_status(TaskStatus.DONE)
+        include_done = s.show_done_in_fullscreen and bool(done_tasks)
+        attempts = []
 
         def attempt(cnts, with_done):
             cols = self._columns(cnts, with_done)
             bounds = self._col_bounds(len(cols))
             size = self._adaptive_font_size(cols, bounds)
-            return cols, bounds, size, self._fits(cols, bounds, size)
+            hidden_active, hidden_total = self._hidden_counts(cols, bounds, size)
+            if not with_done:
+                hidden_total += len(done_tasks)  # Done, убранные с экрана, тоже «скрыты»
+            words_ok = self._fits(cols, bounds, size, height=False)
+            attempts.append(((hidden_active, hidden_total), words_ok, (cols, bounds, size)))
+            return hidden_active == 0 and hidden_total == (0 if with_done else len(done_tasks))
 
-        cols, bounds, size, ok = attempt(counts, include_done)
-        if ok:
-            return cols, bounds, size
-        fallback = (cols, bounds, size)
+        if attempt(counts, include_done):
+            return attempts[-1][2]
+        base_words_ok = attempts[0][1]
 
-        if include_done and self._by_status(TaskStatus.DONE):
-            include_done = False
-            cols, bounds, size, ok = attempt(counts, include_done)
-            if ok:
-                return cols, bounds, size
-            fallback = (cols, bounds, size)
-
-        statuses = [TaskStatus.TO_DO, TaskStatus.STARTED]
         if include_done:
-            statuses.append(TaskStatus.DONE)
+            include_done = False
+            if attempt(counts, include_done):
+                return attempts[-1][2]
+
+        statuses = [st for st in (TaskStatus.TO_DO, TaskStatus.STARTED) if self._by_status(st)]
         counts = dict(counts)
-        while sum(counts[st] for st in statuses) < MAX_TOTAL_COLUMNS:
+
+        def rendered_total():
+            return counts[TaskStatus.TO_DO] + counts[TaskStatus.STARTED] + (counts[TaskStatus.DONE] if include_done else 0)
+
+        while statuses and rendered_total() < MAX_TOTAL_COLUMNS:
             # колонку получает статус, у которого больше всего дел на одну колонку
             busiest = max(statuses, key=lambda st: len(self._by_status(st)) / counts[st])
-            if not self._by_status(busiest):
-                break
             counts[busiest] += 1
-            cols, bounds, size, ok = attempt(counts, include_done)
-            if ok:
-                return cols, bounds, size
-        return fallback
+            if attempt(counts, include_done) and (attempts[-1][1] or not base_words_ok):
+                return attempts[-1][2]
+
+        # целиком не влезает: из вариантов, где слова не стали вылезать за колонку сильнее
+        # исходного, — тот, что скрывает меньше всего активных дел (при равенстве — более ранний)
+        valid = [a for a in attempts if a[1] or not base_words_ok]
+        best = min(valid, key=lambda a: a[0])
+        return best[2]
+
+    def _hidden_counts(self, columns, bounds, size: int) -> tuple[int, int]:
+        """Сколько дел не помещается по высоте: (активных, всего)."""
+        metrics = {kind: QFontMetrics(f) for kind, f in self._fonts_for(size).items()}
+        flags = self._align_flags() | Qt.TextWordWrap
+        gap = max(8, size // 3)
+        h = self.height()
+        active = total = 0
+        for col, (_, inner_w) in zip(columns, bounds):
+            y = int(size * 0.5)
+            for i, task in enumerate(col):
+                fm = metrics[self._font_kind(task)]
+                y += fm.boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, _title(task)).height()
+                if y > h:
+                    rest = col[i:]
+                    total += len(rest)
+                    active += sum(1 for t in rest if t.status.is_active)
+                    break
+                y += gap
+        return active, total
 
     def _col_bounds(self, n_cols: int) -> list[tuple[int, int]]:
         w = self.width()
@@ -239,9 +271,9 @@ class ReminderWindow(QWidget):
             bounds.append((x0, max(10, x1 - x0 - TEXT_LEFT)))
         return bounds
 
-    def _fits(self, columns, bounds, size: int) -> bool:
+    def _fits(self, columns, bounds, size: int, height: bool = True) -> bool:
         """Влезают ли все колонки при данном размере шрифта: ни одно слово не шире
-        колонки и суммарная высота с переносами не выше экрана."""
+        колонки и (если height) суммарная высота с переносами не выше экрана."""
         metrics = {kind: QFontMetrics(f) for kind, f in self._fonts_for(size).items()}
         flags = self._align_flags() | Qt.TextWordWrap
         gap = max(8, size // 3)
@@ -256,6 +288,8 @@ class ReminderWindow(QWidget):
                 for word in title.split():
                     if fm.horizontalAdvance(word) > inner_w:
                         return False
+                if not height:
+                    continue
                 total += fm.boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, title).height() + gap
                 if total - gap > h:
                     return False
@@ -293,7 +327,6 @@ class ReminderWindow(QWidget):
         gap = max(8, size // 3)
 
         more_font = fonts["base"]
-        more_h = metrics["base"].height()
         more_color = QColor(text_color)
         more_color.setAlphaF(0.65)
 
@@ -320,12 +353,17 @@ class ReminderWindow(QWidget):
                 y += height + gap
             if hidden:
                 # не влезающие дела не обрезаются молча: строка «… и ещё N» (issue #1);
-                # если и ей нет места — освобождаем его, убирая последние дела колонки
-                while col_items and y + more_h > h:
+                # если и ей нет места — освобождаем его, убирая последние дела колонки.
+                # Высота меряется с переносом: в узкой колонке строка может занять две.
+                def more_height(text):
+                    return metrics["base"].boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, text).height()
+
+                while col_items and y + more_height(f"… и ещё {hidden}") > h:
                     _, y = col_items.pop()
                     hidden += 1
-                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), more_h,
-                                        more_font, more_color, None, f"… и ещё {hidden}"), y))
+                text = f"… и ещё {hidden}"
+                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), more_height(text),
+                                        more_font, more_color, None, text), y))
             items.extend(item for item, _ in col_items)
         return _Layout(size, bounds, items, n_cols, self.width() / n_cols)
 

@@ -809,6 +809,40 @@ def test_issue_1():
     check("поле переименования не наезжает на крестик",
           w2._edit.geometry().right() < w2.del_btn.geometry().left())
     w2._cancel_edit()
+
+    # двойной щелчок по крестику: второй щелчок приходится на подъехавшую карточку
+    import time as _time
+    from PySide6.QtCore import QEvent as _QEvent, QPointF as _QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import Qt
+    ctx.store.tasks.clear()
+    for i in range(4):
+        ctx.store.add(f"task{i}")
+    main.refresh(animate=False)
+    lst = main._list
+    lst._deleted_at = _time.monotonic() - 10  # предыдущая проверка удаляла только что
+    first = lst._widgets[0]
+    gpos = first.del_btn.mapToGlobal(first.del_btn.rect().center())
+    first.del_btn.click()
+    for _ in range(10):
+        lst._tick()
+    app.processEvents()
+    under = lst._widgets[0]
+    local = _QPointF(under.del_btn.mapFromGlobal(gpos))
+    for et in (_QEvent.MouseButtonDblClick, _QEvent.MouseButtonRelease):
+        ev = QMouseEvent(et, local, _QPointF(gpos), Qt.LeftButton,
+                         Qt.LeftButton if et != _QEvent.MouseButtonRelease else Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(under.del_btn, ev)
+    under.del_btn.click()  # даже «честный» второй click в интервале двойного щелчка
+    app.processEvents()
+    check("двойной щелчок по крестику удаляет одно дело", len(ctx.store.tasks) == 3, str([t.title for t in ctx.store.tasks]))
+    ev = QMouseEvent(_QEvent.MouseButtonDblClick, _QPointF(5, 5), _QPointF(5, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(lst._widgets[0], ev)
+    check("двойной клик сразу после удаления не открывает переименование", lst.active_edit_widget() is None)
+    lst._deleted_at = _time.monotonic() - 10
+    lst._widgets[0].del_btn.click()
+    app.processEvents()
+    check("после интервала крестик снова удаляет", len(ctx.store.tasks) == 2)
     main._quitting = True
     main.close()
 
@@ -860,6 +894,29 @@ def test_issue_1():
     hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
     check("если не влезает — строка «… и ещё N»", bool(more))
     check("показанные + скрытые = все дела", shown + hidden == 100, f"shown={shown} hidden={hidden}")
+
+    # одно слишком длинное слово не прячет Done, если по высоте место есть
+    url = mk(1, TaskStatus.TO_DO, "https://example.com/" + "a" * 120)
+    cols, more, shown = layout(mk(3, TaskStatus.TO_DO) + mk(3, TaskStatus.DONE) + url, show_done_in_fullscreen=True)
+    check("длинное слово не скрывает Done", shown == 7 and not more, f"shown={shown} more={more}")
+
+    # «показывать Done» без Done-дел не съедает лимит колонок
+    cols, more, shown = layout(mk(60, TaskStatus.TO_DO) + mk(10, TaskStatus.STARTED), show_done_in_fullscreen=True,
+                               fullscreen_columns_todo=1, fullscreen_columns_started=1, fullscreen_columns_done=8)
+    check("пустой Done не съедает лимит колонок", cols > 2 and not more, f"cols={cols} more={more}")
+
+    # «… и ещё N» в узкой колонке не вылезает за нижний край
+    st = S.Settings()
+    st.text_size = 14
+    st.fullscreen_min_font_size = 14
+    st.fullscreen_columns_todo = 8
+    st.fullscreen_columns_started = 4
+    win = ReminderWindow(st, mk(400, TaskStatus.TO_DO, "Дело с текстом") + mk(200, TaskStatus.STARTED, "Дело с текстом"))
+    win.resize(1600, 900)
+    lay = win._current_layout()
+    bottom = max(i.rect.y() + i.height for i in lay.items)
+    check("строка «… и ещё N» не вылезает за экран", bottom <= 900, f"bottom={bottom}")
+    win.close()
 
 
 def main():

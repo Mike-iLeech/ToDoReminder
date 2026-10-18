@@ -93,6 +93,13 @@ class StatusButton(QPushButton):
         super().mousePressEvent(event)
 
 
+class DeleteButton(QPushButton):
+    """Крестик удаления. Двойной щелчок по нему не считается вторым нажатием."""
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        event.accept()
+
+
 class TaskWidget(QWidget):
     """Одна задача в списке: кнопка статуса + название. Передвигается через список-родитель."""
 
@@ -131,13 +138,13 @@ class TaskWidget(QWidget):
         layout.addWidget(self.label, 1)
 
         # удаление в один клик (issue #1); пункт «Удалить» в меню ПКМ остаётся
-        self.del_btn = QPushButton("✕")
+        self.del_btn = DeleteButton("✕")
         self.del_btn.setProperty("deleteBtn", True)
         self.del_btn.setFixedSize(DELETE_BTN_SIZE, DELETE_BTN_SIZE)
         self.del_btn.setToolTip("Удалить")
         self.del_btn.setCursor(Qt.PointingHandCursor)
         self.del_btn.setFocusPolicy(Qt.NoFocus)
-        self.del_btn.clicked.connect(lambda: self.list_view.delete_handler(self.task))
+        self.del_btn.clicked.connect(lambda: self.list_view.request_delete(self.task))
         layout.addWidget(self.del_btn)
 
     def _display_title(self) -> str:
@@ -177,7 +184,8 @@ class TaskWidget(QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
+        # второй щелчок двойного клика по крестику, пришедший уже на подъехавшую карточку
+        if event.button() == Qt.LeftButton and not self.list_view.recently_deleted():
             self.beginEditRequested.emit(self.task)
         event.accept()
 
