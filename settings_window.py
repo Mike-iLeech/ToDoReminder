@@ -53,7 +53,9 @@ class SettingsDialog(QDialog):
         self._scroll = QScrollArea()
         self._scroll.setProperty("settingsScroll", True)
         self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # горизонтальная прокрутка появляется только на очень узком экране, где окно не может
+        # стать шире минимальной ширины содержимого — лучше прокрутка, чем обрезанные поля
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget()
         root = QVBoxLayout(content)
@@ -162,6 +164,9 @@ class SettingsDialog(QDialog):
         idx = self.font_combo.findText(self.s.font_family)
         self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.font_combo.currentIndexChanged.connect(self._on_font)
+        # поле узкое, а раскрывающийся список — по ширине названий (каждое своим шрифтом)
+        view = self.font_combo.view()
+        view.setMinimumWidth(view.sizeHintForColumn(0) + 24)
 
         self.style_combo = QComboBox()
         self.style_combo.addItems(STYLE_NAMES)
@@ -316,7 +321,8 @@ class SettingsDialog(QDialog):
         self._color_refs[field] = (btn, on_change)
 
         def pick():
-            color = QColorDialog.getColor(QColor(btn.text()), self, "Выбор цвета")
+            current = QColor(str(getattr(self.s, field)))
+            color = QColorDialog.getColor(current if current.isValid() else QColor("#FFFFFF"), self, "Выбор цвета")
             if color.isValid():
                 new = color.name().upper()
                 on_change(new)
@@ -326,12 +332,27 @@ class SettingsDialog(QDialog):
         return btn
 
     @staticmethod
-    def _refresh_color_btn(btn, hexv):
-        hexv = hexv.upper() if HEX_RE.match(hexv or "") else "#FFFFFF"
-        fg = "#000000" if QColor(hexv).lightness() > 128 else "#FFFFFF"
-        btn.setText(hexv)
-        btn.setToolTip(f"{hexv} — нажмите, чтобы выбрать цвет")
-        btn.setStyleSheet(f"QPushButton {{ background-color: {hexv}; color: {fg}; }}")
+    def _text_color_for(hexv: str) -> str:
+        """Чёрный или белый — что контрастнее на этом фоне (относительная яркость WCAG)."""
+        c = QColor(hexv)
+
+        def lin(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+        lum = 0.2126 * lin(c.red()) + 0.7152 * lin(c.green()) + 0.0722 * lin(c.blue())
+        # контраст с белым (1.05/(L+0.05)) против контраста с чёрным ((L+0.05)/0.05)
+        return "#000000" if (lum + 0.05) / 0.05 >= 1.05 / (lum + 0.05) else "#FFFFFF"
+
+    @classmethod
+    def _refresh_color_btn(cls, btn, hexv):
+        hexv = (hexv or "").strip()
+        text = hexv.upper() if HEX_RE.match(hexv) else hexv  # нестандартное значение показываем как есть
+        fill = QColor(hexv)
+        fill_name = fill.name().upper() if fill.isValid() else "#FFFFFF"
+        btn.setText(text or fill_name)
+        btn.setToolTip(f"{text or fill_name} — нажмите, чтобы выбрать цвет")
+        btn.setStyleSheet(f"QPushButton {{ background-color: {fill_name}; color: {cls._text_color_for(fill_name)}; }}")
 
     def _fit_to_screen(self) -> None:
         """Размер по содержимому, но не выше доступной области экрана; минимальная
@@ -340,20 +361,24 @@ class SettingsDialog(QDialog):
         hint = content.sizeHint()
         scrollbar = self._scroll.verticalScrollBar().sizeHint().width()
         footer_h = self.layout().sizeHint().height() - self._scroll.sizeHint().height()
-        width = max(560, hint.width() + scrollbar)
+        margins = self.layout().contentsMargins()
+        # минимальная ширина — чтобы содержимое не обрезалось справа (горизонтальной прокрутки нет)
+        min_width = content.minimumSizeHint().width() + scrollbar + margins.left() + margins.right() + 2
+        width = max(560, hint.width() + scrollbar, min_width)
         height = hint.height() + max(0, footer_h)
         screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
             width = min(width, avail.width() - 40)
             height = min(height, avail.height() - 60)
-        self.setMinimumSize(min(width, 480), 320)
+        self.setMinimumSize(min(min_width, width), 320)
         self.resize(width, height)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        # окно целиком в пределах экрана (заголовок не уходит за край)
-        screen = self.screen() or QGuiApplication.primaryScreen()
+        # окно целиком в пределах экрана (заголовок не уходит за край); экран — тот,
+        # на котором окно сейчас, а не запомненный (важно для мониторов с x < 0)
+        screen = QGuiApplication.screenAt(self.frameGeometry().center()) or self.screen() or QGuiApplication.primaryScreen()
         if screen is None:
             return
         avail = screen.availableGeometry()
@@ -572,6 +597,8 @@ class SettingsDialog(QDialog):
             self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.style_combo.setCurrentIndex(s.font_style_index)
             self.align_combo.setCurrentIndex(s.alignment_index)
+            self.urgent_size_spin.setValue(s.urgent_fullscreen_size_delta)
+            self.urgent_style_combo.setCurrentIndex(s.urgent_fullscreen_style_index)
             self.opacity_slider.setValue(s.opacity_percent)
             self.opacity_label.setText(f"{s.opacity_percent}%")
             self.autostart_cb.setChecked(s.autostart)

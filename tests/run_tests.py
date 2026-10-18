@@ -1007,7 +1007,7 @@ def test_issue_1():
 
 def test_settings_layout():
     print("## Окно настроек: прокрутка и компактная раскладка")
-    from PySide6.QtWidgets import QLineEdit, QScrollArea
+    from PySide6.QtWidgets import QScrollArea
     from app import AppContext
     from main_window import MainWindow
     from settings_window import SettingsDialog
@@ -1049,10 +1049,25 @@ def test_settings_layout():
           same_row(dlg.urgent_size_spin, dlg._color_refs["urgent_fullscreen_color"][0], dlg.urgent_style_combo))
     check("образец цвета показывает HEX", color_btns[0].text() == ctx.settings_manager.s.bg_color.upper())
 
-    # внутреннее поле счётчиков без собственных отступов и рамки (не ложится поверх пилюли)
-    inner = dlg.interval_spin.findChild(QLineEdit)
-    check("поле внутри счётчика занимает его высоту", inner.height() >= dlg.interval_spin.height() - 8,
-          f"inner={inner.height()} spin={dlg.interval_spin.height()}")
+    # строки формы не сжимаются (раньше окно выше экрана ужимало поля, и текст счётчика обрезался)
+    check("поле интервала не сжато по высоте", dlg.interval_spin.height() >= dlg.interval_spin.sizeHint().height(),
+          f"h={dlg.interval_spin.height()} hint={dlg.interval_spin.sizeHint().height()}")
+
+    # при минимальной ширине окна содержимое не обрезается справа
+    dlg.resize(dlg.minimumWidth(), 400)
+    app.processEvents()
+    viewport_w = dlg._scroll.viewport().width()
+    content_min = dlg._scroll.widget().minimumSizeHint().width()
+    hbar = dlg._scroll.horizontalScrollBar()
+    check("минимальная ширина не обрезает содержимое (или есть горизонтальная прокрутка)",
+          viewport_w >= content_min or (hbar.isVisible() and hbar.maximum() > 0),
+          f"viewport={viewport_w} content={content_min}")
+    check("при обычной ширине горизонтальной прокрутки нет",
+          dlg.minimumWidth() < content_min or not hbar.isVisible() or viewport_w >= content_min)
+
+    # сброс к умолчанию обновляет и поля срочных дел
+    dlg.urgent_size_spin.setValue(20)
+    dlg.urgent_style_combo.setCurrentIndex(3)
 
     # сброс к умолчанию обновляет образцы цветов
     from PySide6.QtWidgets import QMessageBox
@@ -1064,6 +1079,15 @@ def test_settings_layout():
     finally:
         QMessageBox.question = orig_q
     check("сброс обновляет образец цвета", dlg._color_refs["bg_color"][0].text() == S.Settings().bg_color.upper())
+    defaults = S.Settings()
+    check("сброс обновляет поля срочных дел",
+          dlg.urgent_size_spin.value() == defaults.urgent_fullscreen_size_delta
+          and dlg.urgent_style_combo.currentIndex() == defaults.urgent_fullscreen_style_index,
+          f"{dlg.urgent_size_spin.value()} {dlg.urgent_style_combo.currentIndex()}")
+    # контраст подписи на образце: на зелёном Done — тёмный текст
+    from settings_window import SettingsDialog as _SD
+    check("контрастный текст на образце #4CAF50", _SD._text_color_for("#4CAF50") == "#000000")
+    check("контрастный текст на образце #171C26", _SD._text_color_for("#171C26") == "#FFFFFF")
     dlg.close()
     main._quitting = True
     main.close()
