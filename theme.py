@@ -129,6 +129,31 @@ def build_stylesheet(theme: str) -> str:
         color: {c['text']};
     }}
     QSpinBox[spinPill="true"]:focus {{ border: 2px solid {c['accent']}; }}
+    /* внутреннее поле счётчика не должно брать общий стиль QLineEdit (отступы 7px, рамку,
+       обводку фокуса): иначе оно ложится поверх пилюли и в ней не помещается текст */
+    QAbstractSpinBox QLineEdit, QAbstractSpinBox QLineEdit:focus {{
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+        margin: 0;
+        font-size: 12px;
+        color: {c['text']};
+    }}
+    QSpinBox[spinPill="true"] QLineEdit, QSpinBox[spinPill="true"] QLineEdit:focus {{
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton[colorSwatch="true"] {{
+        border: 1px solid {c['input_border']};
+        border-radius: 8px;
+        padding: 0;
+        font-size: 11px;
+        font-weight: 600;
+    }}
+    QLabel[caption="true"] {{ color: {c['muted']}; font-size: 11px; }}
+    QLabel[section="true"] {{ color: {c['text']}; font-size: 13px; font-weight: 600; padding-top: 6px; }}
+    QScrollArea[settingsScroll="true"] > QWidget > QWidget {{ background: transparent; }}
     QComboBox {{
         background: {c['input_bg']};
         border: 1px solid {c['input_border']};

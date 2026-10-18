@@ -1005,6 +1005,70 @@ def test_issue_1():
     win.close()
 
 
+def test_settings_layout():
+    print("## Окно настроек: прокрутка и компактная раскладка")
+    from PySide6.QtWidgets import QLineEdit, QScrollArea
+    from app import AppContext
+    from main_window import MainWindow
+    from settings_window import SettingsDialog
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    dlg = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+    dlg.show()
+    app.processEvents()
+
+    avail = (dlg.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+    check("содержимое в области прокрутки", isinstance(dlg._scroll, QScrollArea) and dlg._scroll.widget() is not None)
+    check("минимальная высота окна мала (окно можно уменьшить)", dlg.minimumSizeHint().height() < 400 and dlg.minimumHeight() <= 400,
+          f"min={dlg.minimumSizeHint().height()}/{dlg.minimumHeight()}")
+    check("окно не выше доступной области экрана", dlg.frameGeometry().height() <= avail.height())
+    dlg.resize(dlg.width(), 350)
+    app.processEvents()
+    check("окно уменьшается по высоте", dlg.height() <= 360, f"h={dlg.height()}")
+
+    def same_row(*widgets):
+        ys = {w.mapTo(dlg, w.rect().center()).y() for w in widgets}
+        return max(ys) - min(ys) <= 2
+
+    dlg.done_combo.setCurrentIndex(1)
+    app.processEvents()
+    check("колонки To Do / Started / Done в одну строку",
+          same_row(dlg.cols_todo_spin, dlg.cols_started_spin, dlg.cols_done_spin) and dlg.cols_done_spin.isVisible())
+    dlg.done_combo.setCurrentIndex(0)
+    app.processEvents()
+    check("колонки Done прячутся вместе с подписью", not dlg._cols_done_box.isVisible())
+    check("размер, шрифт, начертание, выравнивание в одну строку",
+          same_row(dlg.size_spin, dlg.font_combo, dlg.style_combo, dlg.align_combo))
+    color_btns = [dlg._color_refs[f][0] for f in ("bg_color", "text_color", "color_status_todo",
+                                                    "color_status_started", "color_status_done")]
+    check("цвета в одну строку", same_row(*color_btns))
+    check("срочные: увеличение, цвет, начертание в одну строку",
+          same_row(dlg.urgent_size_spin, dlg._color_refs["urgent_fullscreen_color"][0], dlg.urgent_style_combo))
+    check("образец цвета показывает HEX", color_btns[0].text() == ctx.settings_manager.s.bg_color.upper())
+
+    # внутреннее поле счётчиков без собственных отступов и рамки (не ложится поверх пилюли)
+    inner = dlg.interval_spin.findChild(QLineEdit)
+    check("поле внутри счётчика занимает его высоту", inner.height() >= dlg.interval_spin.height() - 8,
+          f"inner={inner.height()} spin={dlg.interval_spin.height()}")
+
+    # сброс к умолчанию обновляет образцы цветов
+    from PySide6.QtWidgets import QMessageBox
+    ctx.settings_manager.s.bg_color = "#123456"
+    orig_q = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        dlg._reset_defaults()
+    finally:
+        QMessageBox.question = orig_q
+    check("сброс обновляет образец цвета", dlg._color_refs["bg_color"][0].text() == S.Settings().bg_color.upper())
+    dlg.close()
+    main._quitting = True
+    main.close()
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -1018,6 +1082,7 @@ def main():
     test_review_fixes()
     test_update_polish()
     test_issue_1()
+    test_settings_layout()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")
