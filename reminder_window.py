@@ -251,8 +251,11 @@ class ReminderWindow(QWidget):
             return counts[TaskStatus.TO_DO] + counts[TaskStatus.STARTED] + (counts[TaskStatus.DONE] if with_done else 0)
 
         while statuses and rendered_total() < MAX_TOTAL_COLUMNS:
-            # колонку получает статус, у которого больше всего дел на одну колонку
+            # колонку получает статус, у которого больше всего дел на одну колонку;
+            # если дел уже не больше, чем колонок, новая колонка лишь сузила бы их
             busiest = max(statuses, key=lambda st: len(self._by_status(st)) / counts[st])
+            if counts[busiest] >= len(self._by_status(busiest)):
+                break
             counts[busiest] += 1
             if attempt(counts, with_done) and (attempts[-1][1] or not base_words_ok):
                 plan = attempts[-1][3]
@@ -295,7 +298,7 @@ class ReminderWindow(QWidget):
                 fm = metrics[self._font_kind(task)]
                 y += fm.boundingRect(QRect(0, 0, inner_w, MEASURE_HEIGHT), flags, _title(task)).height()
                 if y > h:
-                    rest = col[i:]
+                    rest = col[max(i, 1):]   # первое дело колонки показывается всегда
                     total += len(rest)
                     active += sum(1 for t in rest if t.status.is_active)
                     break
@@ -393,25 +396,43 @@ class ReminderWindow(QWidget):
                 title = _title(task)
                 height = metrics[kind].boundingRect(QRect(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), flags, title).height()
                 if y + height > h:
-                    hidden = len(col) - i
-                    break
+                    if i > 0:
+                        hidden = len(col) - i
+                        break
+                    # первое дело колонки рисуется всегда, даже если оно выше экрана: лучше
+                    # видеть его начало, чем одну строку «… и ещё 1». Оно обрезается по
+                    # видимой области (оставляя место под «… и ещё N» для остальных дел)
+                    rest = len(col) - 1
+                    below = text_height(f"… и ещё {rest}", inner_w) + gap if rest else 0
+                    height = max(1, h - below - y)
+                    clip = True
+                else:
+                    clip = False
                 if kind == "done":
                     color = text_color.darker(160)
                 elif kind == "urgent":
                     color = urgent_color
                 else:
                     color = text_color
-                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), height,
+                # высота прямоугольника = высота обрезки: drawText не выходит за него
+                rect_h = height if clip else MEASURE_HEIGHT
+                col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, rect_h), height,
                                         fonts[kind], color, markers[task.status], title), y))
                 y += height + gap
             if hidden:
                 # не влезающие дела не обрезаются молча: строка «… и ещё N» (issue #1);
                 # если и ей нет места — освобождаем его, убирая последние дела колонки
-                while col_items and y + text_height(f"… и ещё {hidden}", inner_w) > h:
+                while len(col_items) > 1 and y + text_height(f"… и ещё {hidden}", inner_w) > h:
                     _, y = col_items.pop()
                     hidden += 1
                 text = f"… и ещё {hidden}"
                 more_h = text_height(text, inner_w)
+                if y + more_h > h and col_items:
+                    # осталось одно первое дело и под строку места нет — подрезаем его
+                    first, fy = col_items[0]
+                    first.height = max(1, h - more_h - gap - fy)
+                    first.rect = QRectF(first.rect.x(), fy, first.rect.width(), first.height)
+                    y = fy + first.height + gap
                 col_items.append((_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), more_h,
                                         more_font, more_color, None, text), y))
                 y += more_h + gap
@@ -420,8 +441,8 @@ class ReminderWindow(QWidget):
 
         if dropped_done:
             # Done убраны ради активных дел — сказать об этом в самой короткой колонке.
-            # Все колонки кончаются не ниже h + gap, а резерв = высота пометки + gap,
-            # так что пометка гарантированно помещается в экран.
+            # Колонки кончаются не ниже h + gap (высокое первое дело обрезается), а резерв =
+            # высота пометки + gap, так что пометка помещается в экран.
             text = self._dropped_note(dropped_done)
             y, x0, inner_w = min(col_ends, key=lambda c: c[0])
             items.append(_Item(QRectF(x0 + TEXT_LEFT, y, inner_w, MEASURE_HEIGHT), text_height(text, inner_w),

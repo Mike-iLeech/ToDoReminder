@@ -896,6 +896,23 @@ def test_issue_1():
     hidden = sum(int(m.rsplit(" ", 1)[1]) for m in more)
     check("одни Done: экран не пустой", shown > 0 and shown + hidden == 300, f"shown={shown} hidden={hidden}")
 
+    # единственное дело выше экрана (срочное со ссылками) всё равно на экране, а не «… и ещё 1»
+    url = "https://example.com/very/long/link/path/to/document"
+    big = Task.create(f"позвонить в бухгалтерию {url} согласовать договор аренды {url} оборудования {url}")
+    big.urgent = True
+    st = S.Settings()
+    st.text_size = 20
+    st.urgent_fullscreen_size_delta = 6
+    st.fullscreen_columns_todo, st.fullscreen_columns_started, st.fullscreen_columns_done = 2, 4, 1
+    win = ReminderWindow(st, [big])
+    win.resize(1024, 600)
+    lay = win._current_layout()
+    titles = [i.title for i in lay.items]
+    check("единственное длинное дело видно", any(t.startswith("⚡") for t in titles) and not any(t.startswith("…") for t in titles),
+          str(titles)[:120])
+    check("колонки не добавляются статусу с одним делом", lay.n_cols == 6, f"cols={lay.n_cols}")
+    win.close()
+
     # пометка о скрытых Done не теряется ни при переполнении, ни когда активные легли впритык
     def note_case(w, h, text_size, n_todo, n_started, n_done):
         st = S.Settings()
