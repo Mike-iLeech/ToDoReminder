@@ -65,6 +65,13 @@ class ReminderManager(QObject):
     def _tick(self) -> None:
         if self._reminder is not None and self._reminder.isVisible():
             return
+        updates = self._ctx.updates
+        if self._remaining <= 1 and updates is not None and updates.blocks_reminders:
+            # открыто модальное окно обновления: напоминание поверх всех окон оказалось бы
+            # заблокированным им — ждём на нуле, пока окно не закроется
+            self._remaining = 0
+            self._update_label()
+            return
         self._remaining -= 1
         self._update_label()
         if self._remaining <= 0:

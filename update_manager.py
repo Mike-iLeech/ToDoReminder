@@ -26,6 +26,14 @@ PERIODIC_CHECK_MS = 6 * 60 * 60 * 1000     # приложение живёт в 
 CLEANUP_RETRY_MS = 3_000
 
 
+def _safe_emit(signal, *args) -> None:
+    """emit из рабочего потока; после выхода из программы мост удалён — молча пропускаем."""
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass
+
+
 class _Bridge(QObject):
     """Сигналы из рабочего потока в GUI-поток (queued-соединение)."""
 
@@ -52,6 +60,8 @@ class UpdateManager(QObject):
         self._progress_dlg = None
         self._cancel = threading.Event()
         self._downloading = False
+        self._closing = False
+        self._modal_messages = 0
 
         self._first = QTimer(self)
         self._first.setSingleShot(True)
@@ -74,10 +84,18 @@ class UpdateManager(QObject):
 
     def shutdown(self) -> None:
         """Выход из программы: остановить таймеры и прервать идущую загрузку."""
+        self._closing = True
         self._first.stop()
         self._periodic.stop()
         self._cleanup.stop()
         self._cancel.set()
+
+    @property
+    def blocks_reminders(self) -> bool:
+        """Открыто модальное окно обновления (загрузка или сообщение). Полноэкранное
+        напоминание поверх всех окон оказалось бы под его блокировкой и не закрывалось
+        бы кликом, поэтому его стоит отложить."""
+        return self._downloading or self._modal_messages > 0
 
     def _cleanup_old(self) -> None:
         self._cleanup_tries += 1
@@ -104,29 +122,31 @@ class UpdateManager(QObject):
         self._checking = True
         self._manual_pending = False
 
+        bridge = self._bridge
+
         def work():
             try:
                 info = updater.fetch_latest()
             except updater.UpdateError as e:
-                self._bridge.check_failed.emit(str(e), silent)
+                _safe_emit(bridge.check_failed, str(e), silent)
             except Exception as e:  # noqa: BLE001 — сеть не должна ронять приложение
-                self._bridge.check_failed.emit(f"Ошибка проверки обновлений: {e}", silent)
+                _safe_emit(bridge.check_failed, f"Ошибка проверки обновлений: {e}", silent)
             else:
-                self._bridge.checked.emit(info, silent)
+                _safe_emit(bridge.checked, info, silent)
 
         threading.Thread(target=work, name="update-check", daemon=True).start()
 
     def _on_check_failed(self, message: str, silent: bool) -> None:
         self._checking = False
         silent = silent and not self._manual_pending
-        if not silent and not self._downloading:
+        if not silent and not self._downloading and not self._closing:
             self._message(QMessageBox.Warning, message)
 
     def _on_checked(self, info, silent: bool) -> None:
         self._checking = False
         silent = silent and not self._manual_pending
-        if self._downloading:
-            return  # проверка, начатая до загрузки, вернулась во время неё
+        if self._downloading or self._closing:
+            return  # проверка вернулась во время загрузки или уже при выходе из программы
         s = self._ctx.settings_manager.s
         if info is None or not updater.is_newer(info.version):
             if not silent:
@@ -151,7 +171,11 @@ class UpdateManager(QObject):
     def _message(self, icon, text: str, title: str = "Обновления") -> None:
         box = QMessageBox(icon, title, text)
         self._styled(box)
-        box.exec()
+        self._modal_messages += 1
+        try:
+            box.exec()
+        finally:
+            self._modal_messages -= 1
 
     def _show_offer(self, info, silent: bool = False) -> None:
         if self._dialog is not None:
@@ -219,7 +243,11 @@ class UpdateManager(QObject):
             self._styled(box)
             open_btn = box.addButton("Открыть страницу релиза", QMessageBox.AcceptRole)
             box.addButton(QMessageBox.Close)
-            box.exec()
+            self._modal_messages += 1
+            try:
+                box.exec()
+            finally:
+                self._modal_messages -= 1
             if box.clickedButton() is open_btn:
                 QDesktopServices.openUrl(QUrl(info.page_url))
             return
@@ -239,12 +267,7 @@ class UpdateManager(QObject):
         dest = updater.download_path(exe)
 
         bridge = self._bridge
-
-        def emit(signal, *args):
-            try:
-                signal.emit(*args)
-            except RuntimeError:
-                pass  # программа уже завершилась и мост удалён
+        emit = _safe_emit
 
         def work():
             try:
