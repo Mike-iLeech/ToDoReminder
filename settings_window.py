@@ -429,7 +429,11 @@ class SettingsDialog(QDialog):
         )
         if answer != QMessageBox.Yes:
             return
+        # служебная дата ежедневного сброса — не пользовательская настройка: если её обнулить,
+        # ежедневная проверка посреди дня удалит Done и сбросит регулярные задачи
+        reset_date = self.s.regular_reset_date
         self.s = Settings()
+        self.s.regular_reset_date = reset_date
         self.sm.s = self.s
         self.sm.save()
         self._apply_defaults_to_ui()

@@ -544,6 +544,97 @@ def test_updater():
           "_PYI_APPLICATION_HOME_DIR" not in env and env.get("PYINSTALLER_RESET_ENVIRONMENT") == "1")
 
 
+def test_review_fixes():
+    print("## Исправления по ревью")
+    import hashlib
+    import updater
+    from PySide6.QtWidgets import QMessageBox
+    from app import AppContext
+    from main_window import MainWindow
+    from settings_window import SettingsDialog
+    from update_manager import UpdateManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    main.show()
+    um = UpdateManager(ctx)
+    ctx.updates = um
+
+    # окно новой версии не должно блокироваться открытыми «Настройками» (WindowModal)
+    dlg = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+    dlg.show()
+    app.processEvents()
+    info = updater.ReleaseInfo("99.0", "v99.0", "", "https://example/rel", "https://example/a.exe", 1, None)
+    um._on_checked(info, False)
+    app.processEvents()
+    offer = um._dialog
+    check("окно обновления не заблокировано настройками",
+          offer is not None and offer.parentWidget() is dlg, f"parent={offer.parentWidget() if offer else None}")
+    # фоновая проверка не пересоздаёт уже открытое окно той же версии
+    um._on_checked(info, True)
+    check("фоновая проверка не пересоздаёт окно", um._dialog is offer)
+    offer.close()
+    dlg.close()
+    app.processEvents()
+
+    # отмена, пришедшая после последнего чанка, не ставит обновление
+    d = Path(tempfile.mkdtemp())
+    new = d / "x.new"
+    new.write_bytes(b"x")
+    installed = []
+    orig_install = updater.install_and_restart
+    updater.install_and_restart = lambda *a, **k: installed.append(a)
+    try:
+        um._cancel.set()
+        um._on_downloaded(new)
+    finally:
+        updater.install_and_restart = orig_install
+    check("отмена после загрузки не устанавливает", not installed and not new.exists())
+
+    # без digest и без размера скачанный файл проверить нельзя — отказ
+    payload = b"abc"
+    src = d / "r.exe"
+    src.write_bytes(payload)
+    blind = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), 0, None)
+    try:
+        updater.download(blind, d / "blind.exe")
+        check("без размера и SHA-256 загрузка отклоняется", False)
+    except updater.UpdateError:
+        check("без размера и SHA-256 загрузка отклоняется", not (d / "blind.exe").exists())
+    sized = updater.ReleaseInfo("9", "v9", "", "", src.as_uri(), len(payload), hashlib.sha256(payload).hexdigest())
+    check("с размером и SHA-256 загрузка проходит", updater.download(sized, d / "ok.exe").read_bytes() == payload)
+
+    # сброс настроек сохраняет служебную дату ежедневного сброса
+    ctx.settings_manager.s.regular_reset_date = "2026-10-18"
+    dlg2 = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+    orig_q = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        dlg2._reset_defaults()
+    finally:
+        QMessageBox.question = orig_q
+    check("сброс настроек не обнуляет дату ежедневного сброса",
+          ctx.settings_manager.s.regular_reset_date == "2026-10-18")
+    dlg2.close()
+
+    # выход после обновления не пишет настройки повторно
+    ctx.settings_manager.flush()
+    mtime = S.SETTINGS_PATH.stat().st_mtime_ns
+    ctx.settings_manager.s.opacity_percent = 55
+    ctx.quit(save=False)
+    ctx.settings_manager.flush()
+    check("quit(save=False) не трогает файл настроек", S.SETTINGS_PATH.stat().st_mtime_ns == mtime)
+
+    # текст релиза пишется в UTF-8 напрямую
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    notes = d / "notes.md"
+    subprocess.run([sys.executable, str(root / "tools" / "release_notes.py"), "v2.7.0.0", str(notes)], check=True)
+    check("текст релиза в UTF-8", "Автообновление" in notes.read_text(encoding="utf-8"))
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -554,6 +645,7 @@ def main():
     test_fullscreen_render()
     test_performance_paths()
     test_updater()
+    test_review_fixes()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")

@@ -1,7 +1,9 @@
 """Печатает раздел CHANGELOG.md для версии — текст релиза на GitHub.
 
 Именно этот текст автообновление показывает пользователю в окне «Доступно обновление».
-python tools/release_notes.py 2.7.0.0 > notes.md
+python tools/release_notes.py 2.7.0.0 notes.md
+Файл пишется напрямую в UTF-8: при перенаправлении через PowerShell кириллица
+искажается кодировкой консоли раннера.
 """
 from pathlib import Path
 import re
@@ -19,5 +21,9 @@ def section(version: str) -> str:
 
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding="utf-8")
-    print(section(sys.argv[1].lstrip("vV")))
+    notes = section(sys.argv[1].lstrip("vV"))
+    if len(sys.argv) > 2:
+        Path(sys.argv[2]).write_text(notes + "\n", encoding="utf-8")
+    else:
+        sys.stdout.reconfigure(encoding="utf-8")
+        print(notes)

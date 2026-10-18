@@ -68,6 +68,7 @@ class SettingsManager(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.s = self._load()
+        self._closed = False
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(self.SAVE_DELAY_MS)
@@ -102,9 +103,16 @@ class SettingsManager(QObject):
         self._save_timer.start()
         self.changed.emit()
 
+    def discard_pending(self) -> None:
+        """Отменить отложенную и все последующие записи (данные уже сохранены, процесс завершается)."""
+        self._save_timer.stop()
+        self._closed = True
+
     def flush(self) -> None:
         """Немедленно записать настройки на диск (и автозапуск в реестр, если он менялся)."""
         self._save_timer.stop()
+        if self._closed:
+            return
         JsonFile(SETTINGS_PATH).save(asdict(self.s))
         # реестр трогаем только при расхождении (в т.ч. если EXE переехал в другую папку)
         wanted = build_command() if self.s.autostart else None

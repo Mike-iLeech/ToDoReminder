@@ -253,13 +253,19 @@ class AppContext:
         if self.show_list_win is win:
             self.show_list_win = None
 
-    def quit(self) -> None:
+    def quit(self, save: bool = True) -> None:
+        """save=False — всё уже записано (перезапуск после обновления): новая версия
+        к этому моменту может держать файлы данных, повторно их не трогаем."""
         if self.main_window is not None:
             self.main_window._quitting = True
-            self.main_window._save_position()
+            if save:
+                self.main_window._save_position()
         if self.reminders is not None:
             self.reminders.shutdown()
-        self.settings_manager.flush()
+        if save:
+            self.settings_manager.flush()
+        else:
+            self.settings_manager.discard_pending()
         if self.tray is not None:
             self.tray.hide()
             self.app.processEvents()

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -120,6 +121,8 @@ def fetch_latest(timeout: float = 15) -> ReleaseInfo | None:
 def download(info: ReleaseInfo, dest: Path, progress=None, cancelled=None, timeout: float = 30) -> Path:
     """Качает EXE в dest (через dest.part), проверяет размер и SHA-256."""
     dest = Path(dest)
+    if not info.sha256 and not info.asset_size:
+        raise UpdateError("GitHub не сообщил ни размер, ни контрольную сумму файла — проверить его нельзя.")
     part = dest.with_name(dest.name + ".part")
     sha = hashlib.sha256()
     done = 0
@@ -147,9 +150,14 @@ def download(info: ReleaseInfo, dest: Path, progress=None, cancelled=None, timeo
     except UpdateError:
         _unlink_quietly(part)
         raise
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
         _unlink_quietly(part)
         raise UpdateError(f"Не удалось скачать обновление: {e}") from e
+
+
+def discard(path: Path) -> None:
+    """Удалить скачанный, но не установленный файл."""
+    _unlink_quietly(path)
 
 
 def _unlink_quietly(path: Path) -> None:

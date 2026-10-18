@@ -6,6 +6,7 @@ import threading
 from PySide6.QtCore import QObject, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -47,6 +48,7 @@ class UpdateManager(QObject):
         self._bridge.downloaded.connect(self._on_downloaded)
         self._bridge.download_failed.connect(self._on_download_failed)
         self._checking = False
+        self._manual_pending = False
         self._dialog = None
         self._progress_dlg = None
         self._cancel = threading.Event()
@@ -83,9 +85,16 @@ class UpdateManager(QObject):
             self.check(silent=True)
 
     def check(self, silent: bool = False) -> None:
-        if self._checking or self._downloading:
+        if self._downloading:
+            if not silent:
+                QMessageBox.information(self._parent(), "Обновления", "Обновление уже загружается.")
+            return
+        if self._checking:
+            # ручной запрос во время фоновой проверки: результат покажем как для ручного
+            self._manual_pending = self._manual_pending or not silent
             return
         self._checking = True
+        self._manual_pending = False
 
         def work():
             try:
@@ -101,12 +110,14 @@ class UpdateManager(QObject):
 
     def _on_check_failed(self, message: str, silent: bool) -> None:
         self._checking = False
+        silent = silent and not self._manual_pending
         if not silent:
             QMessageBox.warning(self._parent(), "Обновления", message)
 
     def _on_checked(self, info, silent: bool) -> None:
         self._checking = False
-        s = self._ctx.settings_manager.s
+        silent = silent and not self._manual_pending
+        s =self._ctx.settings_manager.s
         if info is None or not updater.is_newer(info.version):
             if not silent:
                 QMessageBox.information(self._parent(), "Обновления",
@@ -117,16 +128,22 @@ class UpdateManager(QObject):
         if silent and self._ctx.tray is not None:
             self._ctx.tray.showMessage("ToDo Reminder", f"Доступна новая версия {info.version}",
                                        QSystemTrayIcon.Information, 8000)
-        self._show_offer(info)
+        self._show_offer(info, silent)
 
     # ------------------------------------------------------------------ dialog
 
     def _parent(self):
+        # открыто модальное окно (например «Настройки») — иначе наш диалог окажется под его блокировкой
+        modal = QApplication.activeModalWidget()
+        if modal is not None:
+            return modal
         mw = self._ctx.main_window
         return mw if mw is not None and mw.isVisible() else None
 
-    def _show_offer(self, info) -> None:
+    def _show_offer(self, info, silent: bool = False) -> None:
         if self._dialog is not None:
+            if silent and getattr(self._dialog, "release_version", None) == info.version:
+                return  # фоновая проверка не пересоздаёт уже открытое окно и не крадёт фокус
             self._dialog.close()
         dlg = QDialog(self._parent())
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -160,6 +177,7 @@ class UpdateManager(QObject):
         row.addWidget(later_btn)
         row.addWidget(go_btn)
         lay.addLayout(row)
+        dlg.release_version = info.version
         dlg.destroyed.connect(lambda *_: setattr(self, "_dialog", None))
         self._dialog = dlg
         dlg.show()
@@ -233,7 +251,13 @@ class UpdateManager(QObject):
             QMessageBox.warning(self._parent(), "Обновление", message)
 
     def _on_downloaded(self, path) -> None:
+        # «Отмена» могла прийти после последнего чанка; проверяем до закрытия прогресса,
+        # потому что close() у QProgressDialog сам испускает canceled
+        cancelled = self._cancel.is_set()
         self._close_progress()
+        if cancelled:
+            updater.discard(path)
+            return
         mw = self._ctx.main_window
         args = ["--updated"]
         if mw is None or not mw.isVisible():
@@ -245,4 +269,5 @@ class UpdateManager(QObject):
             QMessageBox.critical(self._parent(), "Обновление",
                                  f"Не удалось установить обновление: {e}\nПрограмма продолжит работу в текущей версии.")
             return
-        self._ctx.quit()
+        # всё уже сохранено, новая версия запущена — выходим, не трогая файлы данных
+        self._ctx.quit(save=False)

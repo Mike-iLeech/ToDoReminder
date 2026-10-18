@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          python tools/release_notes.py $tag | Out-File -Encoding utf8 notes.md
+          python tools/release_notes.py $tag notes.md
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag dist/ToDoReminder.exe --clobber
