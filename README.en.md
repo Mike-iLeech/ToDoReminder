@@ -1,6 +1,6 @@
 # ToDo Reminder
 
-![Version](https://img.shields.io/badge/version-2.7.1.0-blue)
+![Version](https://img.shields.io/badge/version-2.7.2.0-blue)
 ![License](https://img.shields.io/badge/license-GPLv3-blue)
 ![Python](https://img.shields.io/badge/Python-3.14-informational)
 ![Framework](https://img.shields.io/badge/UI-PySide6-blueviolet)
