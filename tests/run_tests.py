@@ -1851,6 +1851,21 @@ def test_finalize_on_exit():
             QMessageBox.critical = orig_crit
         check("если сохранить некуда — выход отменяется", not quits and not ctx3._storage_finalized)
 
+        # «Выход» из меню трея — тот самый путь, которым выходит пользователь
+        from system_tray import SystemTray
+        fake4 = FakeStore()
+        S._STORE = fake4
+        ctx4 = AppContext(app)
+        ctx4.app = type("A", (), {"quit": lambda self: None, "processEvents": lambda self: None,
+                                   "aboutToQuit": app.aboutToQuit})()
+        tray4 = SystemTray(ctx4.settings_manager, type("C", (), {
+            "app": app, "open_main_window": lambda: None, "move_to_primary_screen": lambda: None,
+            "check_updates": lambda: None, "quit": ctx4.quit})())
+        exit_action = [a for a in tray4.contextMenu().actions() if a.text() == "Выход"][0]
+        exit_action.trigger()
+        check("«Выход» из трея записывает данные внутрь EXE", fake4.finalized == 1)
+        tray4.hide()
+
         fake2 = FakeStore()
         S._STORE = fake2
         ctx2 = AppContext(app)
