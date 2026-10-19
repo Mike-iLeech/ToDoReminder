@@ -373,12 +373,37 @@ def test_interval_pill():
         app.processEvents()
         spin = main.interval_spin
         edit = spin.findChild(QLineEdit)
+        m = edit.textMargins()
+        room = edit.width() - m.left() - m.right()
         # в Qt 6.12 при NoButtons поле внутри было шириной 1 px — цифр не видно
         check(f"поле в пилюле шире текста ({theme})",
-              edit.width() >= edit.fontMetrics().horizontalAdvance(spin.text()) and edit.width() > 40,
-              f"edit={edit.width()} text={spin.text()!r}")
+              room >= edit.fontMetrics().horizontalAdvance(spin.text()) and room > 40,
+              f"edit={edit.width()} margins={m.left()}/{m.right()} text={spin.text()!r}")
+        check(f"текст пилюли не прижат к рамке ({theme})", 6 <= _spin_text_inset(spin) <= 9,
+              f"inset={_spin_text_inset(spin)}")
+
+    # в Qt 6.12 текст в счётчиках настроек встал вплотную к левой рамке
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import QSpinBox
+    from settings_window import SettingsDialog
+    for theme in ("light", "dark"):
+        ctx.settings_manager.s.theme = theme
+        dlg = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), main)
+        dlg.show()
+        app.processEvents()
+        spins = dlg.findChildren(QSpinBox)
+        bad = [(s.text(), _spin_text_inset(s)) for s in spins if not 6 <= _spin_text_inset(s) <= 9]
+        check(f"отступ текста в счётчиках настроек ({theme}, {len(spins)} шт.)", len(spins) >= 6 and not bad,
+              f"{bad}")
+        dlg.close()
     main._quitting = True
     main.close()
+
+
+def _spin_text_inset(spin) -> int:
+    """Расстояние от левого края счётчика до начала области текста."""
+    edit = spin.lineEdit()
+    return edit.x() + edit.textMargins().left()
 
 
 def test_window():
