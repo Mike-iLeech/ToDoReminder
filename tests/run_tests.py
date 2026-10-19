@@ -1444,6 +1444,68 @@ def test_embedded_store():
     check("чистый EXE + .unsaved.json с поколением — восстановление",
           sN2.load_tasks()["tasks"][0]["title"] == "из .unsaved" and not list((dN / "w").glob("*conflict*")))
 
+    # ---- ревью 6: происхождение копий
+    # F1: сбой на ПК A (рабочая копия) + флешка привезла .unsaved.json с ПК B той же основы
+    dR, eR = fresh("r1")
+    sR = D.EmbeddedStore(eR, work_dir=dR / "w")
+    sR.save_tasks({"tasks": [{"id": "1", "title": "основа"}]})
+    sR.finalize()
+    gR = D.read_embedded(eR)[1]["gen"]
+    sR2 = D.EmbeddedStore(eR, work_dir=dR / "w")
+    sR2.save_tasks({"tasks": [{"id": "1", "title": "A-CRASH"}]})              # сбой на A
+    eR.with_name(eR.name + ".unsaved.json").write_text(json.dumps(
+        {"rev": 99, "base_gen": gR, "pending_gen": None, "origin": "pc-B", "settings": {},
+         "tasks": {"tasks": [{"id": "1", "title": "B-UNSAVED"}]}}, ensure_ascii=False), encoding="utf-8")
+    sR3 = D.EmbeddedStore(eR, work_dir=dR / "w")
+    every = "".join(p.read_text(encoding="utf-8") for p in list((dR / "w").glob("*.json")) + list(dR.glob("*.json")))
+    check("две ветки одной основы с разных ПК: обе сохранены",
+          "A-CRASH" in every + json.dumps(sR3.load_tasks(), ensure_ascii=False)
+          and "B-UNSAVED" in every + json.dumps(sR3.load_tasks(), ensure_ascii=False))
+    check("о второй ветке есть сообщение", any("другой копии" in n for n in sR3.notices))
+
+    # F2: EXE не прочитался — рабочая копия этого ПК не подменяется чужой с бОльшим rev
+    dQ, eQ = fresh("r4")
+    sQ = D.EmbeddedStore(eQ, work_dir=dQ / "w")
+    sQ.save_tasks({"tasks": [{"id": "1", "title": "A-CRASH"}]})              # сбой: рабочая копия
+    eQ.with_name(eQ.name + ".unsaved.json").write_text(json.dumps(
+        {"rev": 500, "base_gen": "H", "pending_gen": None, "origin": "pc-B", "settings": {},
+         "tasks": {"tasks": [{"id": "1", "title": "B-UNSAVED"}]}}, ensure_ascii=False), encoding="utf-8")
+    orig_ins3 = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        sQ2 = D.EmbeddedStore(eQ, work_dir=dQ / "w")
+    finally:
+        D.inspect_embedded = orig_ins3
+    check("EXE не прочитался: рабочая копия этого ПК не подменена чужой",
+          sQ2.load_tasks()["tasks"][0]["title"] == "A-CRASH"
+          and "A-CRASH" in sQ2.work_file.path.read_text(encoding="utf-8"))
+
+    # F3: повреждён хвост на чистой основе — своя .unsaved не считается «чужой»
+    dS, eS = fresh("r6")
+    sS = D.EmbeddedStore(eS, work_dir=dS / "w")
+    sS.save_tasks({"tasks": [{"id": "1", "title": "сбой"}]})                 # рабочая копия без поколения
+    eS.with_name(eS.name + ".unsaved.json").write_text(json.dumps(
+        {"rev": 1, "base_gen": None, "pending_gen": None, "origin": sS._origin, "settings": {},
+         "tasks": {"tasks": [{"id": "1", "title": "сбой-ранее"}]}}, ensure_ascii=False), encoding="utf-8")
+    eS.write_bytes(program[:-30])                                              # испорчен cookie
+    sS2 = D.EmbeddedStore(eS, work_dir=dS / "w")
+    check("пустая линия: своя копия не считается чужой", not any("другой копии" in n for n in sS2.notices))
+
+    # F4: хвост повреждён, копий нет, EXE только для чтения — без ложной ошибки и пустых файлов
+    dT, eT = fresh("r2")
+    eT.write_bytes(program[:-30])
+    orig_w4 = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("только чтение"))
+    try:
+        res = []
+        for _ in range(3):
+            st_t2 = D.EmbeddedStore(eT, work_dir=dT / "w")
+            res.append((st_t2.finalize(), len(list((dT / "w").glob("*session*"))) if (dT / "w").exists() else 0))
+    finally:
+        D.write_exe_with_data = orig_w4
+    check("повреждён хвост, нечего сохранять, только чтение: выход без ошибки и без пустых файлов",
+          res == [(True, 0)] * 3, str(res))
+
     # импорт понимает формат рабочей/запасной копии
     from import_export import load_tasks as _load_tasks_file
     copy_file = dfb / "copy.json"

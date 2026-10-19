@@ -18,10 +18,12 @@
 """
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -211,6 +213,7 @@ class EmbeddedStore:
         self.fallback_path: Path | None = None  # куда сохранены данные, если в EXE записать не удалось
         self._obsolete_files: list[Path] = []   # учтённые запасные файлы — убрать после записи в EXE
         self._base_unknown = False             # EXE не читался и копий не было — «основа» правок неизвестна
+        self._origin = self._make_origin()
         self._load()
 
     # ---- загрузка
@@ -226,6 +229,17 @@ class EmbeddedStore:
     #      с сообщением (открыть можно через «Импорт»);
     #   4. хвост EXE повреждён — опора на рабочую копию этого ПК и копии её линии.
 
+    def _make_origin(self) -> str:
+        """Метка «где сделана копия»: ПК + пользователь + рабочая папка. Нужна, чтобы отличать
+        копии одной основы, сделанные в разных местах (флешка переезжает между ПК вместе с
+        <exe>.unsaved.json): «перекрытой» считается только своя же более старая копия."""
+        try:
+            user = getpass.getuser()
+        except Exception:  # noqa: BLE001
+            user = ""
+        raw = f"{socket.gethostname()}|{user}|{self.work_dir}".lower().encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()[:12]
+
     def _copy_paths(self) -> list[Path]:
         paths = [self.work_file.path] if self.work_file.exists() else []
         if self.work_dir.exists():
@@ -237,10 +251,16 @@ class EmbeddedStore:
 
     @staticmethod
     def _read_copy(path: Path) -> dict | None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            return None
+        for attempt in range(3):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                break
+            except OSError:
+                if attempt == 2:
+                    return None
+                time.sleep(0.1)     # файл на миг занят (антивирус) — не считать его испорченным
+            except ValueError:
+                return None
         return data if isinstance(data, dict) and isinstance(data.get("rev"), int) else None
 
     @staticmethod
@@ -327,7 +347,8 @@ class EmbeddedStore:
                 anchor = max(copies, key=lambda c: c[0].stat().st_mtime if c[0].exists() else 0)
             if anchor is not None:
                 line = gens(anchor[1])
-                own = [c for c in copies if c is anchor or (line and gens(c[1]) & line)]
+                own = [c for c in copies if c is anchor or not c[1].get("base_unknown") and (
+                    (line and gens(c[1]) & line) or (not line and not gens(c[1])))]
                 chosen = max(own, key=lambda c: c[1]["rev"])
                 self.notices.append("Данные внутри программы повреждены — восстановлены из копии на этом "
                                     f"компьютере (сохранена {self._modified(chosen[0])}). Если программой "
@@ -348,11 +369,16 @@ class EmbeddedStore:
             if c is chosen:
                 continue
             path, data = c
-            if c in own:
+            reference = chosen[1].get("origin") if chosen else self._origin
+            superseded = c in own and data.get("origin") == reference and (
+                chosen is None or data["rev"] <= chosen[1]["rev"])
+            if superseded:
                 if damaged:
                     self._obsolete_files.append(path)   # своя, но старше выбранной — убрать после записи
                 else:
                     self._remove_copy(path)             # правило 2: перекрыта EXE или выбранной копией
+            elif c in own and chosen is None:
+                self._remove_copy(path)                 # той же основы и не новее EXE — уже внутри
             elif data.get("base_unknown"):
                 self._set_aside(path, "unsaved", "Изменения, сделанные, когда данные программы не "
                                                  f"читались ({self._modified(path)}), отложены — их можно "
@@ -382,7 +408,10 @@ class EmbeddedStore:
         понятным сообщением, а не приняты за чужие или устаревшие."""
         self._exe_unreadable = f"не удалось прочитать программу: {error}"
         copies = [(p, d) for p in self._copy_paths() if (d := self._read_copy(p)) is not None]
-        chosen = max(copies, key=lambda c: c[1]["rev"]) if copies else None
+        work = next((c for c in copies if c[0] == self.work_file.path), None)
+        # рабочую копию этого ПК никогда не подменяем чужой (её бы перезаписали при сохранении);
+        # запасной файл берём, только если рабочей копии нет
+        chosen = work or (max(copies, key=lambda c: c[1]["rev"]) if copies else None)
         doc = chosen[1] if chosen else {"rev": 0, "settings": {}, "tasks": {}}
         self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
                      "tasks": _section(doc, "tasks")}
@@ -452,7 +481,7 @@ class EmbeddedStore:
         self._write_work()
 
     def _work_payload(self) -> dict:
-        payload = dict(self._doc, base_gen=self._base_gen, pending_gen=self._pending_gen)
+        payload = dict(self._doc, base_gen=self._base_gen, pending_gen=self._pending_gen, origin=self._origin)
         if self._base_unknown:
             payload["base_unknown"] = True
         return payload
@@ -485,8 +514,7 @@ class EmbeddedStore:
             return True
         if self._exe_unreadable:
             self.last_error = self._exe_unreadable
-            self._save_fallback()
-            return False
+            return self._write_failed()
         gen = uuid.uuid4().hex
         embed = self.exe.with_name(self.exe.name + EMBED_SUFFIX)
         old = self.exe.with_name(self.exe.name + OLD_SUFFIX)
@@ -497,8 +525,7 @@ class EmbeddedStore:
         except OSError as e:
             _unlink_quietly(embed)
             self.last_error = f"запись в программу: {e}"
-            self._save_fallback()
-            return False
+            return self._write_failed()
         try:
             _replace_with_retry(embed, self.exe)
         except OSError as e:
@@ -508,8 +535,7 @@ class EmbeddedStore:
             except OSError:
                 pass        # .embed не удаляем: если не вернулся и прежний EXE, в нём наши данные
             self.last_error = f"запись в программу: {e}"
-            self._save_fallback()
-            return False
+            return self._write_failed()
         self._base_gen = gen
         self._pending_gen = None
         self._embedded_rev = self._doc["rev"]
@@ -540,10 +566,20 @@ class EmbeddedStore:
         # а если установка не удастся и случится сбой — из неё восстановятся правки сессии
         self._write_work()
 
+    def _write_failed(self) -> bool:
+        """В EXE записать не удалось. Сохранять нечего (пустой список, настройки по умолчанию) —
+        это не ошибка выхода; иначе данные кладутся в файл на диске, и выход считается неудачным."""
+        if not self._doc["settings"] and not self._doc["tasks"]:
+            return True
+        self._save_fallback()
+        return False
+
     def _save_fallback(self) -> None:
         """В EXE записать не удалось — убедиться, что данные сессии лежат хоть где-то на диске,
         и запомнить где (для сообщения пользователю)."""
         self.fallback_path = None
+        if not self._doc["settings"] and not self._doc["tasks"]:
+            return      # сохранять нечего
         if not self._work_blocked and self._work_ok and self.work_file.exists():
             self.fallback_path = self.work_file.path
             return
