@@ -1111,7 +1111,14 @@ def test_embedded_store():
 
     d = Path(tempfile.mkdtemp())
     exe = d / "ToDoReminder.exe"
-    program = b"MZ" + os.urandom(4000) + b"MEI\x0c\x0b\x0a\x0b\x0e" + os.urandom(100)
+    import json
+    import shutil
+    import struct as _struct
+    # как настоящий onefile-EXE PyInstaller: заканчивается записью cookie «!8sIIii64s» (88 байт),
+    # где имя python*.dll добито нулями — т.е. чистая программа сама кончается нулями
+    program = b"MZ" + os.urandom(4000) + _struct.pack("!8sIIii64s", b"MEI\x0c\x0b\x0a\x0b\x0e",
+                                                        4090, 3000, 500, 312, b"python312.dll")
+    check("поддельный EXE кончается нулями, как настоящий", program.endswith(b"\x00" * 28))
     exe.write_bytes(program)
     work = d / "work"
 
@@ -1258,6 +1265,91 @@ def test_embedded_store():
     exe7.write_bytes(bytes(raw7))
     s77 = D.EmbeddedStore(exe7, work_dir=d7 / "w2")
     check("повреждённые данные внутри программы — с сообщением", any("повреждены" in n for n in s77.notices))
+
+    # чистый EXE (только что из релиза) — без ложного «повреждены»
+    dc = Path(tempfile.mkdtemp())
+    clean_exe = dc / "ToDoReminder.exe"
+    clean_exe.write_bytes(program)
+    sc = D.EmbeddedStore(clean_exe, work_dir=dc / "w")
+    check("чистый EXE из релиза — без сообщений", not sc.notices and not sc.dirty)
+    real = Path(__file__).resolve().parent.parent / "dist" / "ToDoReminder.exe"
+    if real.exists():   # если собран — проверяем и настоящий (только чтение копии, не запуск)
+        real_copy = dc / "real.exe"
+        shutil.copy2(real, real_copy)
+        base_r, doc_r, dmg_r = D.inspect_embedded(real_copy)
+        check("собранный dist\\ToDoReminder.exe распознаётся как чистый", doc_r is None and not dmg_r)
+
+    # обрезанный хвост без рабочей копии — с сообщением, а не тихий пустой список
+    dt = Path(tempfile.mkdtemp())
+    trunc = dt / "ToDoReminder.exe"
+    trunc.write_bytes((program + D.pack({"rev": 2, "gen": "g", "settings": {}, "tasks": {"tasks": [{"id": "1", "title": "x"}]}}))[:-10])
+    st_t = D.EmbeddedStore(trunc, work_dir=dt / "w")
+    check("обрезанный хвост без рабочей копии — с сообщением", any("повреждены" in n for n in st_t.notices))
+
+    # запасной файл (session / .unsaved.json) подхватывается при следующем запуске
+    dfb = Path(tempfile.mkdtemp())
+    exe_fb = dfb / "ToDoReminder.exe"
+    exe_fb.write_bytes(program)
+    s_fb0 = D.EmbeddedStore(exe_fb, work_dir=dfb / "w")
+    s_fb0.save_tasks({"tasks": [{"id": "1", "title": "в EXE"}]})
+    s_fb0.finalize()
+    s_fb1 = D.EmbeddedStore(exe_fb, work_dir=dfb / "w")
+    s_fb1._work_blocked = True
+    s_fb1.save_tasks({"tasks": [{"id": "1", "title": "из запасного"}]})
+    orig_w2 = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("только чтение"))
+    try:
+        s_fb1.finalize()
+    finally:
+        D.write_exe_with_data = orig_w2
+    fb_path = s_fb1.fallback_path
+    s_fb2 = D.EmbeddedStore(exe_fb, work_dir=dfb / "w")
+    check("запасной файл подхватывается при следующем запуске",
+          s_fb2.load_tasks()["tasks"][0]["title"] == "из запасного" and any("Восстановлены" in n for n in s_fb2.notices))
+    s_fb2.finalize()
+    check("после записи в EXE запасной файл убран", fb_path is not None and not Path(fb_path).exists())
+    unsaved = exe_fb.with_name(exe_fb.name + ".unsaved.json")
+    emb = D.read_embedded(exe_fb)[1]
+    unsaved.write_text(json.dumps({"rev": emb["rev"] + 1, "base_gen": emb["gen"], "pending_gen": None,
+                                   "settings": {}, "tasks": {"tasks": [{"id": "1", "title": "из .unsaved"}]}},
+                                  ensure_ascii=False), encoding="utf-8")
+    s_fb3 = D.EmbeddedStore(exe_fb, work_dir=dfb / "w")
+    check(".unsaved.json рядом с EXE подхватывается", s_fb3.load_tasks()["tasks"][0]["title"] == "из .unsaved")
+    s_fb3.finalize()
+    check("после записи в EXE .unsaved.json убран", not unsaved.exists())
+
+    # свой EXE не прочитался: сообщение, нет ложного «повреждены»; следующий запуск — без ложного конфликта
+    dun = Path(tempfile.mkdtemp())
+    exe_un = dun / "ToDoReminder.exe"
+    exe_un.write_bytes(program)
+    s_un0 = D.EmbeddedStore(exe_un, work_dir=dun / "w")
+    s_un0.save_tasks({"tasks": [{"id": "1", "title": "база"}]})
+    s_un0.finalize()
+    s_un1 = D.EmbeddedStore(exe_un, work_dir=dun / "w")
+    s_un1.save_tasks({"tasks": [{"id": "1", "title": "перед занятым EXE"}]})   # сбой: рабочая копия есть
+    orig_ins = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("файл занят"))
+    try:
+        s_un2 = D.EmbeddedStore(exe_un, work_dir=dun / "w")
+    finally:
+        D.inspect_embedded = orig_ins
+    check("EXE не прочитался: сообщение без ложного «повреждены», данные из рабочей копии",
+          any("Не удалось прочитать" in n for n in s_un2.notices) and not any("повреждены" in n for n in s_un2.notices)
+          and s_un2.load_tasks()["tasks"][0]["title"] == "перед занятым EXE")
+    s_un2.save_tasks({"tasks": [{"id": "1", "title": "во время занятого"}]})
+    s_un2.finalize()
+    s_un3 = D.EmbeddedStore(exe_un, work_dir=dun / "w")
+    check("после занятого EXE — правки восстановлены без ложного конфликта",
+          s_un3.load_tasks()["tasks"][0]["title"] == "во время занятого"
+          and not list((dun / "w").glob("*conflict*")))
+
+    # импорт понимает формат рабочей/запасной копии
+    from import_export import load_tasks as _load_tasks_file
+    copy_file = dfb / "copy.json"
+    copy_file.write_text(json.dumps({"rev": 3, "settings": {}, "tasks": {"tasks": [
+        {"id": "1", "title": "из копии", "status": "To Do"}]}}, ensure_ascii=False), encoding="utf-8")
+    items = _load_tasks_file(copy_file, "json")
+    check("импорт открывает рабочую/запасную копию", [t for t, *_ in items] == ["из копии"])
 
     # выдернутая флешка: конец EXE обнулён / обрезан
     d8 = Path(tempfile.mkdtemp())

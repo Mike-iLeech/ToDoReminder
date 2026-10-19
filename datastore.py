@@ -35,6 +35,8 @@ from storage import JsonFile
 MAGIC = b"TODOREMINDER-D1\x00"          # 16 байт: метка и версия формата хвоста
 TRAILER = struct.Struct("<QI16s")       # длина данных, CRC32 данных, метка
 CHUNK = 1024 * 1024
+PYI_COOKIE = b"MEI\x0c\x0b\x0a\x0b\x0e"   # метка архива PyInstaller в конце onefile-EXE
+PYI_COOKIE_RECORD = 88                    # struct «!8sIIii64s»: метка, длины, версия, имя python*.dll
 EMBED_SUFFIX = ".embed"
 OLD_SUFFIX = ".old"
 
@@ -57,10 +59,16 @@ def inspect_embedded(path) -> tuple[int, dict | None, bool]:
         tail = f.read(TRAILER.size)
         length, crc, magic = TRAILER.unpack(tail)
         if magic != MAGIC:
-            # файл кончается нулями — типичный след выдернутой флешки (недописанные кластеры):
-            # хвост, скорее всего, был и пропал. Программа-то запустится (загрузчик PyInstaller
-            # находит свой архив раньше), а вот данные потеряны — об этом надо сказать
-            return size, None, tail == b"\x00" * TRAILER.size
+            # Нашего хвоста нет. Чистая программа (из релиза, ещё без данных) кончается ровно
+            # служебной записью PyInstaller (cookie «MEI…», 88 байт) — это нормально. Если же
+            # в самом конце нет ни нашего хвоста, ни cookie, файл обрезан или испорчен (например,
+            # флешку выдернули при записи) — данные пропали. Искать cookie «где-то рядом» нельзя:
+            # при обрезке нескольких байт хвоста она нашлась бы перед ним, и потеря прошла бы тихо
+            clean = False
+            if size >= PYI_COOKIE_RECORD:
+                f.seek(size - PYI_COOKIE_RECORD)
+                clean = f.read(len(PYI_COOKIE)) == PYI_COOKIE
+            return size, None, not clean
         if length > size - TRAILER.size:
             return size, None, True
         base = size - TRAILER.size - length
@@ -201,6 +209,7 @@ class EmbeddedStore:
         self._exe_unreadable: str | None = None
         self._work_ok = True                  # последняя запись рабочей копии удалась
         self.fallback_path: Path | None = None  # куда сохранены данные, если в EXE записать не удалось
+        self._obsolete_files: list[Path] = []   # учтённые запасные файлы — убрать после записи в EXE
         self._load()
 
     # ---- загрузка
@@ -229,6 +238,9 @@ class EmbeddedStore:
             _unlink_quietly(self.work_file.path)
             if self.work_file.path.exists():
                 self._work_blocked = True   # уже отложена, но оригинал не удалить — не трогаем
+                self.notices.append(f"Рабочую копию данных не удаётся заменить ({self.work_file.path}) — "
+                                    "в этой сессии защита от сбоя не работает, выходите из программы "
+                                    "через меню трея, чтобы данные записались")
             return
         stamp = time.strftime("%Y%m%d-%H%M%S")
         target = self.work_dir / f"work-{self._key}-{tag}-{stamp}-{digest}.json"
@@ -249,14 +261,39 @@ class EmbeddedStore:
                 return
         self.notices.append(f"{message}: {target}")
 
+    def _fallback_files(self) -> list[Path]:
+        """Запасные файлы, куда сохранялись данные, когда в EXE записать не удалось."""
+        found = sorted(self.work_dir.glob(f"work-{self._key}-session-*.json")) if self.work_dir.exists() else []
+        unsaved = self.exe.with_name(self.exe.name + ".unsaved.json")
+        if unsaved.exists():
+            found.append(unsaved)
+        return found
+
+    @staticmethod
+    def _read_copy(path: Path) -> dict | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and isinstance(data.get("rev"), int) else None
+
+    @staticmethod
+    def _same_content(a: dict, b: dict) -> bool:
+        return _section(a, "settings") == _section(b, "settings") and _section(a, "tasks") == _section(b, "tasks")
+
+    @staticmethod
+    def _modified(path: Path) -> str:
+        try:
+            return time.strftime("%d.%m.%Y %H:%M", time.localtime(path.stat().st_mtime))
+        except OSError:
+            return "неизвестно когда"
+
     def _load(self) -> None:
         try:
             _, embedded, damaged = inspect_embedded(self.exe)
         except OSError as e:
-            # свой же EXE не прочитался: данные в нём могут быть, просто недоступны сейчас.
-            # Писать в EXE в этой сессии нельзя — иначе запись отрезала бы настоящий хвост
-            embedded, damaged = None, False
-            self._exe_unreadable = f"не удалось прочитать программу: {e}"
+            self._load_unreadable(e)
+            return
         e_gen = embedded.get("gen") if embedded else None
         e_rev = _as_int(embedded.get("rev")) if embedded else 0
         work = self._read_work()
@@ -265,42 +302,70 @@ class EmbeddedStore:
             # потерян (обрезан или испорчен целиком); это повреждение, а не «чистый» EXE
             damaged = True
 
-        if work is not None and embedded is not None and \
-                _section(work, "settings") == _section(embedded, "settings") and \
-                _section(work, "tasks") == _section(embedded, "tasks"):
+        if work is not None and embedded is not None and self._same_content(work, embedded):
             # в рабочей копии то же, что в программе (например, её не дал удалить антивирус) —
             # ни восстанавливать, ни откладывать нечего
             self._drop_work()
             work = None
 
+        def continues(copy: dict) -> bool:
+            pending = copy.get("pending_gen")
+            return copy.get("base_gen") == e_gen or bool(pending and pending == e_gen)
+
+        # запасные файлы прошлых неудачных выходов — такие же копии, как рабочая
+        fallbacks = []
+        for path in self._fallback_files():
+            copy = self._read_copy(path)
+            if copy is None:
+                self.notices.append(f"Не удалось прочитать файл с несохранёнными данными: {path}")
+            elif embedded is not None and self._same_content(copy, embedded):
+                self._obsolete_files.append(path)       # уже внутри программы — убрать при выходе
+            else:
+                fallbacks.append((path, copy))
+
         doc = None
         if damaged:
-            if work is not None:
-                doc = work
-                try:
-                    when = time.strftime("%d.%m.%Y %H:%M", time.localtime(self.work_file.path.stat().st_mtime))
-                except OSError:
-                    when = "неизвестно когда"
-                self.notices.append("Данные внутри программы повреждены — восстановлены из рабочей "
-                                    f"копии на этом компьютере (сохранена {when}). Если программой "
+            candidates = ([(self.work_file.path, work)] if work is not None else []) + fallbacks
+            if candidates:
+                path, best = max(candidates, key=lambda c: c[1]["rev"])
+                doc = best
+                if path != self.work_file.path:
+                    self._obsolete_files.append(path)
+                self.notices.append("Данные внутри программы повреждены — восстановлены из копии на этом "
+                                    f"компьютере (сохранена {self._modified(path)}). Если программой "
                                     "пользовались на другом ПК, эти данные могут быть старее")
+                for other_path, _ in candidates:
+                    if other_path not in (path, self.work_file.path):
+                        self._obsolete_files.append(other_path)
             else:
                 self.notices.append("Данные внутри программы повреждены и не прочитаны — список начат "
                                     "заново. Если у вас есть экспорт, его можно импортировать")
-        elif work is not None:
-            pending = work.get("pending_gen")
-            if work.get("base_gen") == e_gen or (pending and pending == e_gen):
-                # продолжение тех же данных (в т.ч. после установки обновления, куда они были
-                # перенесены): рабочая копия новее, только если прошлый выход не успел
-                # записать их в EXE (сбой, выключение, нет прав, не установилось обновление)
-                if embedded is None or work["rev"] > e_rev:
-                    doc = work
-                    self.notices.append("Восстановлены изменения, которые не успели записаться "
-                                        "в программу при прошлом выходе")
-            else:
-                self._set_aside("conflict", "Найдены несохранённые изменения от другой копии данных — "
-                                            "программа уже содержит более новые. Старые изменения "
-                                            "отложены в файл")
+        else:
+            own = []
+            if work is not None:
+                if continues(work):
+                    own.append((self.work_file.path, work))
+                else:
+                    self._set_aside("conflict", "Найдены несохранённые изменения от другой копии данных — "
+                                                "программа уже содержит более новые. Старые изменения "
+                                                "отложены в файл")
+            for path, copy in fallbacks:
+                if continues(copy):
+                    own.append((path, copy))
+                else:
+                    self.notices.append("Найдены несохранённые изменения от другой копии данных "
+                                        f"(сохранены {self._modified(path)}), программа уже содержит "
+                                        f"более новые. Файл оставлен: {path}")
+            newer = [c for c in own if embedded is None or c[1]["rev"] > e_rev]
+            if newer:
+                path, best = max(newer, key=lambda c: c[1]["rev"])
+                doc = best
+                self.notices.append("Восстановлены изменения, которые не успели записаться "
+                                    "в программу при прошлом выходе")
+            for path, _ in own:
+                if path != self.work_file.path:
+                    self._obsolete_files.append(path)   # учтены (или устарели) — убрать после записи в EXE
+
         if doc is None and embedded is not None:
             doc = embedded
         if doc is None:
@@ -310,7 +375,27 @@ class EmbeddedStore:
                      "tasks": _section(doc, "tasks")}
         self._base_gen = e_gen
         self._embedded_rev = e_rev if embedded is not None else 0
+        if self._obsolete_files and not self.dirty:
+            self._embedded_rev = -1     # данные уже внутри, но запасные файлы надо убрать при выходе
+        if doc is not embedded and doc is not work:
+            self._write_work()          # подхваченный запасной файл становится рабочей копией
         self._merge_legacy()
+
+    def _load_unreadable(self, error: OSError) -> None:
+        """Свой же EXE не прочитался (занят, сбой диска): данные в нём могут быть, просто сейчас
+        недоступны. Писать в EXE в этой сессии нельзя — иначе запись отрезала бы настоящий хвост.
+        Работаем с рабочей копией (если есть), сохраняя её «родословную», чтобы следующий
+        запуск узнал в ней продолжение своих данных."""
+        self._exe_unreadable = f"не удалось прочитать программу: {error}"
+        work = self._read_work()
+        doc = work or {"rev": 0, "settings": {}, "tasks": {}}
+        self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
+                     "tasks": _section(doc, "tasks")}
+        self._base_gen = work.get("base_gen") if work else None
+        self._pending_gen = work.get("pending_gen") if work else None
+        self._embedded_rev = self._doc["rev"]
+        self.notices.append(f"Не удалось прочитать данные программы ({error}). Изменения этой сессии "
+                            "будут сохранены на этом компьютере, но не внутри программы")
 
     def _merge_legacy(self) -> None:
         """Папка data от старых версий: забрать то, чего ещё нет внутри, и удалить её после
@@ -388,7 +473,8 @@ class EmbeddedStore:
         """При выходе: записать данные внутрь EXE. False — не удалось (данные остаются
         в рабочей копии на этом ПК и будут записаны при следующем выходе)."""
         if not self.dirty:
-            self._drop_work()
+            if not self._exe_unreadable:    # EXE не прочитан — рабочая копия единственный источник
+                self._drop_work()
             return True
         if self._exe_unreadable:
             self.last_error = self._exe_unreadable
@@ -422,6 +508,9 @@ class EmbeddedStore:
         self._embedded_rev = self._doc["rev"]
         self._drop_work()
         self._drop_legacy()
+        for path in self._obsolete_files:
+            _unlink_quietly(path)
+        self._obsolete_files = []
         schedule_delete(old)
         return True
 
