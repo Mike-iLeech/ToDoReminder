@@ -1549,6 +1549,50 @@ def test_embedded_store():
     check("копия без метки происхождения не даёт ложного конфликта",
           not any("другой копии" in n for n in sH3.notices) and not list((dH / "w").glob("*conflict*")))
 
+    # ---- ревью 8: копии без метки не дают удалить чужое
+    def unsaved_file(ee, title, rev, base_gen, origin=None):
+        data = {"rev": rev, "base_gen": base_gen, "pending_gen": None, "settings": {},
+                "tasks": {"tasks": [{"id": "1", "title": title}]}}
+        if origin:
+            data["origin"] = origin
+        ee.with_name(ee.name + ".unsaved.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def all_text_of(dd):
+        return "".join(p.read_text(encoding="utf-8") for p in list((dd / "w").glob("*.json")) + list(dd.glob("*.json")))
+
+    for label, own_rev, own_origin, foreign_rev, foreign_origin in (
+            ("H1", 7, None, 5, "pcB"),      # своя старого формата новее, чужая с меткой
+            ("H2", 5, None, 8, "pcB"),      # своя старого формата старше
+            ("H7", 2, "mine", 9, None)):    # своя нового формата, чужая .unsaved без метки
+        dX, eX = fresh(label)
+        sX = D.EmbeddedStore(eX, work_dir=dX / "w")
+        sX.save_tasks({"tasks": [{"id": "1", "title": "base"}]})
+        sX.finalize()
+        gX = D.read_embedded(eX)[1]
+        work_doc = {"rev": gX["rev"] + own_rev, "base_gen": gX["gen"], "pending_gen": None, "settings": {},
+                    "tasks": {"tasks": [{"id": "1", "title": f"OWN-{label}"}]}}
+        if own_origin:
+            work_doc["origin"] = sX._origin
+        sX.work_file.save(work_doc)
+        unsaved_file(eX, f"FOREIGN-{label}", gX["rev"] + foreign_rev, gX["gen"], foreign_origin)
+        sX2 = D.EmbeddedStore(eX, work_dir=dX / "w")
+        txt = all_text_of(dX) + json.dumps(sX2.load_tasks(), ensure_ascii=False)
+        check(f"{label}: ни своя, ни чужая ветка не удалены", f"OWN-{label}" in txt and f"FOREIGN-{label}" in txt)
+
+    # H4: EXE не прочитался, чужой .unsaved без метки новее — рабочая копия не подменяется
+    dY, eY = fresh("h4")
+    sY = D.EmbeddedStore(eY, work_dir=dY / "w")
+    sY.save_tasks({"tasks": [{"id": "1", "title": "OWN-W"}]})
+    unsaved_file(eY, "FOREIGN-NOORIGIN", 10, None)
+    orig_ins5 = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        sY2 = D.EmbeddedStore(eY, work_dir=dY / "w")
+    finally:
+        D.inspect_embedded = orig_ins5
+    check("H4: чужой .unsaved без метки не подменяет рабочую копию",
+          sY2.load_tasks()["tasks"][0]["title"] == "OWN-W" and "OWN-W" in sY2.work_file.path.read_text(encoding="utf-8"))
+
     # импорт понимает формат рабочей/запасной копии
     from import_export import load_tasks as _load_tasks_file
     copy_file = dfb / "copy.json"

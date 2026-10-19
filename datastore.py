@@ -240,6 +240,14 @@ class EmbeddedStore:
         raw = f"{socket.gethostname()}|{user}|{self.work_dir}".lower().encode("utf-8")
         return hashlib.sha1(raw).hexdigest()[:12]
 
+    def _origin_of(self, copy) -> str | None:
+        """Происхождение копии. У копий без метки (созданы до её появления) своей считается
+        только та, что лежит в рабочей папке этого ПК (рабочая копия и session-файлы всегда
+        локальны); <exe>.unsaved.json без метки мог приехать на флешке с другого ПК —
+        происхождение неизвестно (None), его не удаляют как «перекрытый», а откладывают."""
+        path, data = copy
+        return data.get("origin") or (self._origin if path.parent == self.work_dir else None)
+
     def _copy_paths(self) -> list[Path]:
         paths = [self.work_file.path] if self.work_file.exists() else []
         if self.work_dir.exists():
@@ -369,9 +377,8 @@ class EmbeddedStore:
             if c is chosen:
                 continue
             path, data = c
-            reference = chosen[1].get("origin") if chosen else self._origin
-            # копии без метки (созданы до её появления) считаются своими — иначе ложный «конфликт»
-            same_origin = reference is None or data.get("origin") in (reference, None)
+            reference = self._origin_of(chosen) if chosen else self._origin
+            same_origin = reference is not None and self._origin_of(c) == reference
             superseded = c in own and same_origin and (
                 chosen is None or data["rev"] <= chosen[1]["rev"])
             if superseded:
@@ -412,7 +419,7 @@ class EmbeddedStore:
         copies = [(p, d) for p in self._copy_paths() if (d := self._read_copy(p)) is not None]
         # самая свежая копия ЭТОГО ПК (рабочая или его же запасной файл): чужой копией рабочую
         # не подменяем, а устаревшую рабочую не берём поверх более свежего своего запасного файла
-        mine = [c for c in copies if c[0] == self.work_file.path or c[1].get("origin") in (self._origin, None)]
+        mine = [c for c in copies if self._origin_of(c) == self._origin]
         chosen = (max(mine, key=lambda c: c[1]["rev"]) if mine
                   else (max(copies, key=lambda c: c[1]["rev"]) if copies else None))
         for c in mine:
