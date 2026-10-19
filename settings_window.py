@@ -24,12 +24,11 @@ from PySide6.QtWidgets import (
 
 from reminder_window import MAX_TOTAL_COLUMNS
 from settings import Settings
+from theme import build_stylesheet
 from update_manager import CHECK_INTERVAL_CHOICES, DEFAULT_CHECK_HOURS
 
 UPDATE_INTERVAL_NAMES = {1: "раз в час", 3: "раз в 3 часа", 6: "раз в 6 часов",
                          12: "раз в 12 часов", 24: "раз в сутки"}
-from theme import build_stylesheet
-
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 STYLE_NAMES = ["Обычный", "Жирный", "Курсив", "Жирный курсив"]
 

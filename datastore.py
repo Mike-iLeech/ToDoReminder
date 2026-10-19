@@ -377,6 +377,13 @@ class EmbeddedStore:
             if c is chosen:
                 continue
             path, data = c
+            if chosen is not None and self._same_content(data, chosen[1]):
+                # то же содержимое, что у выбранной копии, — ничего не теряется, откладывать нечего
+                if damaged:
+                    self._obsolete_files.append(path)
+                else:
+                    self._remove_copy(path)
+                continue
             reference = self._origin_of(chosen) if chosen else self._origin
             same_origin = reference is not None and self._origin_of(c) == reference
             superseded = c in own and same_origin and (

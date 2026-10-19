@@ -1593,6 +1593,19 @@ def test_embedded_store():
     check("H4: чужой .unsaved без метки не подменяет рабочую копию",
           sY2.load_tasks()["tasks"][0]["title"] == "OWN-W" and "OWN-W" in sY2.work_file.path.read_text(encoding="utf-8"))
 
+    # J3: копия с тем же содержимым, что у выбранной, не даёт ложного «конфликта»
+    dJ, eJ = fresh("j3")
+    unsaved_file(eJ, "с флешки", 4, None)
+    orig_ins6 = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        D.EmbeddedStore(eJ, work_dir=dJ / "w")        # содержимое .unsaved перешло в рабочую копию
+    finally:
+        D.inspect_embedded = orig_ins6
+    sJ = D.EmbeddedStore(eJ, work_dir=dJ / "w")
+    check("одинаковое содержимое копий — без ложного конфликта",
+          not any("другой копии" in n for n in sJ.notices) and not list((dJ / "w").glob("*conflict*")))
+
     # импорт понимает формат рабочей/запасной копии
     from import_export import load_tasks as _load_tasks_file
     copy_file = dfb / "copy.json"

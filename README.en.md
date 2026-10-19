@@ -27,7 +27,7 @@ fullscreen timer reminders, dark/light theme and a system tray.
 - **System tray** — closing minimizes to tray, LMB restores the window, RMB opens the menu (including "Exit").
 - **Import / export** as **JSON / TXT / CSV**.
 - **Clear list** only after confirmation.
-- **Portability** — settings and tasks are stored inside the EXE itself: no files next to it; copy the EXE to a USB stick and the data goes with it.
+- **Portability** — settings and tasks are stored inside the EXE itself: no files next to it (only if writing fails, a fallback `.unsaved.json` that the app picks up itself); copy the EXE to a USB stick and the data goes with it.
 - **Single instance** — launching again just shows the running window.
 - **Auto-update** — new versions are downloaded straight from GitHub Releases.
 
