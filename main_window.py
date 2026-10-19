@@ -3,7 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QDialog,
@@ -260,7 +259,10 @@ class MainWindow(QWidget):
         self.interval_spin = QSpinBox()
         self.interval_spin.setProperty("spinPill", True)
         self.interval_spin.setRange(1, 1440)
-        self.interval_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        # Кнопки-стрелки не отключаем (NoButtons), а прячем стилем (hiddenButtons, ширина 0):
+        # в Qt 6.12 при NoButtons + таблице стилей поле ввода внутри получало ширину 1 px,
+        # и в пилюле не было видно цифр. Менять значение — кнопками «−»/«+» рядом.
+        self.interval_spin.setProperty("hiddenButtons", True)
         self.interval_spin.setAlignment(Qt.AlignCenter)
         self.interval_spin.setSuffix(" мин")
         self.interval_spin.setFixedSize(96, 30)

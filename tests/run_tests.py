@@ -356,6 +356,31 @@ def test_reminders():
 
 
 # ---------------------------------------------------------------- Окно
+def test_interval_pill():
+    print("## Пилюля интервала в главном окне")
+    from PySide6.QtWidgets import QLineEdit
+    from app import AppContext
+    from main_window import MainWindow
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    ctx = AppContext(app)
+    main = MainWindow(ctx)
+    ctx.main_window = main
+    for theme in ("light", "dark"):
+        ctx.settings_manager.s.theme = theme
+        main.apply_theme()
+        main.show()
+        app.processEvents()
+        spin = main.interval_spin
+        edit = spin.findChild(QLineEdit)
+        # в Qt 6.12 при NoButtons поле внутри было шириной 1 px — цифр не видно
+        check(f"поле в пилюле шире текста ({theme})",
+              edit.width() >= edit.fontMetrics().horizontalAdvance(spin.text()) and edit.width() > 40,
+              f"edit={edit.width()} text={spin.text()!r}")
+    main._quitting = True
+    main.close()
+
+
 def test_window():
     print("## Главное окно")
     from app import AppContext
@@ -1277,7 +1302,8 @@ def test_embedded_store():
         real_copy = dc / "real.exe"
         shutil.copy2(real, real_copy)
         base_r, doc_r, dmg_r = D.inspect_embedded(real_copy)
-        check("собранный dist\\ToDoReminder.exe распознаётся как чистый", doc_r is None and not dmg_r)
+        # чистый после сборки или уже с данными (если его запускали и выходили) — но не «повреждён»
+        check("собранный dist\\ToDoReminder.exe не считается повреждённым", not dmg_r)
 
     # обрезанный хвост без рабочей копии — с сообщением, а не тихий пустой список
     dt = Path(tempfile.mkdtemp())
@@ -1956,6 +1982,7 @@ def main():
     test_drag_critical()
     test_reminders()
     test_window()
+    test_interval_pill()
     test_fullscreen_render()
     test_performance_paths()
     test_updater()
