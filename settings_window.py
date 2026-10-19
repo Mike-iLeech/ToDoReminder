@@ -3,18 +3,19 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -26,6 +27,22 @@ from settings import Settings
 from theme import build_stylesheet
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+STYLE_NAMES = ["Обычный", "Жирный", "Курсив", "Жирный курсив"]
+
+
+class FontComboBox(QComboBox):
+    """Поле узкое, а раскрывающийся список — по ширине названий (каждое своим шрифтом).
+    Ширина считается при первом раскрытии: перебор сотен шрифтов при каждом открытии
+    окна настроек заметно его замедлял."""
+
+    _popup_sized = False
+
+    def showPopup(self) -> None:
+        if not self._popup_sized:
+            view = self.view()
+            view.setMinimumWidth(view.sizeHintForColumn(0) + 24)
+            self._popup_sized = True
+        super().showPopup()
 
 
 class SettingsDialog(QDialog):
@@ -37,15 +54,36 @@ class SettingsDialog(QDialog):
         self.s: Settings = settings_manager.s
         self._preview_callback = None
         self._update_callback = None
-        self._color_refs = {}  # field -> (btn, edit, on_change)
+        self._color_refs = {}  # field -> (кнопка-образец, on_change)
         self.setWindowTitle("Настройки")
         self.setWindowModality(Qt.WindowModal)
-        self.resize(420, 760)
         self.setStyleSheet(build_stylesheet(self.s.theme))
 
-        root = QVBoxLayout(self)
+        # Всё содержимое — в области прокрутки: на экране с масштабом 125–150 % окно
+        # не помещалось по высоте, а его минимальная высота была больше экрана, и при
+        # попытке растянуть его Windows уводила окно за край. Кнопки внизу — вне прокрутки.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 8)
+        outer.setSpacing(8)
+        self._scroll = QScrollArea()
+        self._scroll.setProperty("settingsScroll", True)
+        self._scroll.setWidgetResizable(True)
+        # горизонтальная прокрутка появляется только на очень узком экране, где окно не может
+        # стать шире минимальной ширины содержимого — лучше прокрутка, чем обрезанные поля
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(12, 10, 12, 4)
+        root.setSpacing(8)
+        self._scroll.setWidget(content)
+        outer.addWidget(self._scroll, 1)
+
+        # ---- напоминание
+        root.addWidget(self._section("Напоминание"))
         form = QFormLayout()
         form.setSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         root.addLayout(form)
 
         # интервал напоминаний, минуты (хранится в секундах)
@@ -55,43 +93,6 @@ class SettingsDialog(QDialog):
         self.interval_spin.setValue(self.s.reminder_interval_seconds // 60)
         self.interval_spin.valueChanged.connect(self._on_interval)
         form.addRow("Интервал напоминаний", self.interval_spin)
-
-        # вывод выполненных дел
-        self.done_combo = QComboBox()
-        self.done_combo.addItems(["Нет", "Да"])
-        self.done_combo.setCurrentIndex(1 if self.s.show_done_in_fullscreen else 0)
-        self.done_combo.currentIndexChanged.connect(self._on_done)
-        form.addRow("Выводить выполненные дела\nв полноэкранном уведомлении?", self.done_combo)
-
-        # автоудаление выполненных (issue #1)
-        self.auto_remove_cb = QCheckBox("Удалять выполненные дела в начале нового дня и при запуске")
-        self.auto_remove_cb.setChecked(self.s.auto_remove_done)
-        self.auto_remove_cb.toggled.connect(self._on_auto_remove)
-        form.addRow(self.auto_remove_cb)
-
-        # число колонок по статусам в полноэкранном уведомлении
-        cols_label = QLabel("Колонки в полноэкранном уведомлении")
-        cols_label.setStyleSheet("font-weight: bold;")
-        form.addRow(cols_label)
-
-        self.cols_todo_spin = QSpinBox()
-        self.cols_todo_spin.setRange(1, 8)
-        self.cols_todo_spin.setValue(self.s.fullscreen_columns_todo)
-        self.cols_todo_spin.valueChanged.connect(self._on_cols_todo)
-        form.addRow("Колонки To Do", self.cols_todo_spin)
-
-        self.cols_started_spin = QSpinBox()
-        self.cols_started_spin.setRange(1, 8)
-        self.cols_started_spin.setValue(self.s.fullscreen_columns_started)
-        self.cols_started_spin.valueChanged.connect(self._on_cols_started)
-        form.addRow("Колонки Started", self.cols_started_spin)
-
-        self.cols_done_spin = QSpinBox()
-        self.cols_done_spin.setRange(1, 8)
-        self.cols_done_spin.setValue(self.s.fullscreen_columns_done)
-        self.cols_done_spin.valueChanged.connect(self._on_cols_done)
-        form.addRow("Колонки Done", self.cols_done_spin)
-        self._sync_done_cols_visibility()
 
         # монитор
         self.monitor_combo = QComboBox()
@@ -107,72 +108,12 @@ class SettingsDialog(QDialog):
         self.monitor_combo.currentIndexChanged.connect(self._on_monitor)
         form.addRow("Экран для уведомления", self.monitor_combo)
 
-        # размер текста
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(12, 100)
-        self.size_spin.setSingleStep(1)
-        self.size_spin.setSuffix(" px")
-        self.size_spin.setValue(self.s.text_size)
-        self.size_spin.valueChanged.connect(self._on_text_size)
-        form.addRow("Размер текста", self.size_spin)
-
-        # шрифт
-        from PySide6.QtGui import QFontDatabase
-
-        self.font_combo = QComboBox()
-        families = QFontDatabase.families()
-        for fam in families:
-            self.font_combo.addItem(fam)
-            item_font = QFont(fam)
-            self.font_combo.setItemData(self.font_combo.count() - 1, item_font, Qt.FontRole)
-        idx = self.font_combo.findText(self.s.font_family)
-        self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.font_combo.currentIndexChanged.connect(self._on_font)
-        form.addRow("Шрифт", self.font_combo)
-
-        # начертание
-        self.style_combo = QComboBox()
-        self.style_combo.addItems(["Обычный", "Жирный", "Курсив", "Жирный курсив"])
-        self.style_combo.setCurrentIndex(self.s.font_style_index)
-        self.style_combo.currentIndexChanged.connect(self._on_style)
-        form.addRow("Начертание", self.style_combo)
-
-        # выравнивание
-        self.align_combo = QComboBox()
-        self.align_combo.addItems(["Слева", "По центру", "Справа"])
-        self.align_combo.setCurrentIndex(self.s.alignment_index)
-        self.align_combo.currentIndexChanged.connect(self._on_align)
-        form.addRow("Выравнивание", self.align_combo)
-
-        # фон
-        self.bg_row = self._color_row(form, "Фон", "bg_color", self.s.bg_color, self._on_bg)
-        # текст
-        self.fg_row = self._color_row(form, "Текст", "text_color", self.s.text_color, self._on_fg)
-
-        # цвета статусов
-        self.todo_color_row = self._color_row(form, "Цвет статуса To Do", "color_status_todo", self.s.color_status_todo, self._on_todo_color)
-        self.started_color_row = self._color_row(form, "Цвет статуса Started", "color_status_started", self.s.color_status_started, self._on_started_color)
-        self.done_color_row = self._color_row(form, "Цвет статуса Done", "color_status_done", self.s.color_status_done, self._on_done_color)
-
-        # срочные дела в полноэкранном уведомлении
-        urgent_label = QLabel("Срочные дела (полноэкранное)")
-        urgent_label.setStyleSheet("font-weight: bold;")
-        form.addRow(urgent_label)
-
-        self.urgent_size_spin = QSpinBox()
-        self.urgent_size_spin.setRange(0, 30)
-        self.urgent_size_spin.setSuffix(" px")
-        self.urgent_size_spin.setValue(self.s.urgent_fullscreen_size_delta)
-        self.urgent_size_spin.valueChanged.connect(self._on_urgent_size)
-        form.addRow("Увеличение размера шрифта", self.urgent_size_spin)
-
-        self.urgent_color_row = self._color_row(form, "Цвет срочных дел", "urgent_fullscreen_color", self.s.urgent_fullscreen_color, self._on_urgent_color)
-
-        self.urgent_style_combo = QComboBox()
-        self.urgent_style_combo.addItems(["Обычный", "Жирный", "Курсив", "Жирный курсив"])
-        self.urgent_style_combo.setCurrentIndex(self.s.urgent_fullscreen_style_index)
-        self.urgent_style_combo.currentIndexChanged.connect(self._on_urgent_style)
-        form.addRow("Начертание срочных дел", self.urgent_style_combo)
+        # вывод выполненных дел
+        self.done_combo = QComboBox()
+        self.done_combo.addItems(["Нет", "Да"])
+        self.done_combo.setCurrentIndex(1 if self.s.show_done_in_fullscreen else 0)
+        self.done_combo.currentIndexChanged.connect(self._on_done)
+        form.addRow("Показывать выполненные дела", self.done_combo)
 
         # прозрачность 0–100%
         opacity_box = QWidget()
@@ -182,18 +123,133 @@ class SettingsDialog(QDialog):
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(self.s.opacity_percent)
         self.opacity_label = QLabel(f"{self.s.opacity_percent}%")
+        self.opacity_label.setMinimumWidth(36)
         self.opacity_slider.valueChanged.connect(self._on_opacity)
         opacity_lay.addWidget(self.opacity_slider, 1)
         opacity_lay.addWidget(self.opacity_label)
-        form.addRow("Прозрачность (0% непрозрачно)", opacity_box)
+        form.addRow("Прозрачность (0% — непрозрачно)", opacity_box)
 
-        # автозапуск
+        # автоудаление выполненных (issue #1)
+        self.auto_remove_cb = QCheckBox("Удалять выполненные дела в начале нового дня и при запуске")
+        self.auto_remove_cb.setChecked(self.s.auto_remove_done)
+        self.auto_remove_cb.toggled.connect(self._on_auto_remove)
+        root.addWidget(self.auto_remove_cb)
+
+        # ---- число колонок по статусам: To Do (n) | Started (n) | Done (n) в одну строку
+        root.addWidget(self._section("Колонки в полноэкранном уведомлении"))
+        cols_row = QHBoxLayout()
+        cols_row.setSpacing(14)
+        self.cols_todo_spin = self._pill_spin(self.s.fullscreen_columns_todo, self._on_cols_todo)
+        self.cols_started_spin = self._pill_spin(self.s.fullscreen_columns_started, self._on_cols_started)
+        self.cols_done_spin = self._pill_spin(self.s.fullscreen_columns_done, self._on_cols_done)
+        self._cols_done_box = None
+        for title, spin in (("To Do", self.cols_todo_spin), ("Started", self.cols_started_spin),
+                            ("Done", self.cols_done_spin)):
+            box = QWidget()
+            lay = QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+            lay.addWidget(QLabel(title))
+            lay.addWidget(spin)
+            cols_row.addWidget(box)
+            if spin is self.cols_done_spin:
+                self._cols_done_box = box
+        cols_row.addStretch(1)
+        root.addLayout(cols_row)
+        self._sync_done_cols_visibility()
+
+        # ---- текст: Размер | Шрифт | Начертание | Выравнивание в одну строку
+        root.addWidget(self._section("Текст напоминания"))
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(12, 100)
+        self.size_spin.setSingleStep(1)
+        self.size_spin.setSuffix(" px")
+        self.size_spin.setValue(self.s.text_size)
+        self.size_spin.valueChanged.connect(self._on_text_size)
+
+        from PySide6.QtGui import QFontDatabase
+
+        self.font_combo = FontComboBox()
+        # длинные названия шрифтов не должны растягивать строку из четырёх полей
+        self.font_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.font_combo.setMinimumContentsLength(8)
+        for fam in QFontDatabase.families():
+            self.font_combo.addItem(fam)
+            self.font_combo.setItemData(self.font_combo.count() - 1, QFont(fam), Qt.FontRole)
+        idx = self.font_combo.findText(self.s.font_family)
+        self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.font_combo.currentIndexChanged.connect(self._on_font)
+
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(STYLE_NAMES)
+        self.style_combo.setCurrentIndex(self.s.font_style_index)
+        self.style_combo.currentIndexChanged.connect(self._on_style)
+
+        self.align_combo = QComboBox()
+        self.align_combo.addItems(["Слева", "По центру", "Справа"])
+        self.align_combo.setCurrentIndex(self.s.alignment_index)
+        self.align_combo.currentIndexChanged.connect(self._on_align)
+
+        root.addLayout(self._captioned_row([
+            ("Размер", self.size_spin, 0),
+            ("Шрифт", self.font_combo, 2),
+            ("Начертание", self.style_combo, 1),
+            ("Выравнивание", self.align_combo, 1),
+        ]))
+
+        # ---- цвета — все в одну строку, с подписью над каждым образцом
+        root.addWidget(self._section("Цвета"))
+        colors_row = QHBoxLayout()
+        colors_row.setSpacing(8)
+        for caption, field, handler in (
+            ("Фон", "bg_color", self._on_bg),
+            ("Текст", "text_color", self._on_fg),
+            ("To Do", "color_status_todo", self._on_todo_color),
+            ("Started", "color_status_started", self._on_started_color),
+            ("Done", "color_status_done", self._on_done_color),
+        ):
+            colors_row.addWidget(self._captioned(caption, self._color_button(field, handler)), 1)
+        root.addLayout(colors_row)
+
+        # ---- срочные дела: Увеличение | Цвет | Начертание
+        root.addWidget(self._section("Срочные дела в напоминании"))
+        self.urgent_size_spin = QSpinBox()
+        self.urgent_size_spin.setRange(0, 30)
+        self.urgent_size_spin.setPrefix("+")
+        self.urgent_size_spin.setSuffix(" px")
+        self.urgent_size_spin.setValue(self.s.urgent_fullscreen_size_delta)
+        self.urgent_size_spin.valueChanged.connect(self._on_urgent_size)
+
+        urgent_color_btn = self._color_button("urgent_fullscreen_color", self._on_urgent_color)
+
+        self.urgent_style_combo = QComboBox()
+        self.urgent_style_combo.addItems(STYLE_NAMES)
+        self.urgent_style_combo.setCurrentIndex(self.s.urgent_fullscreen_style_index)
+        self.urgent_style_combo.currentIndexChanged.connect(self._on_urgent_style)
+
+        root.addLayout(self._captioned_row([
+            ("Увеличение размера", self.urgent_size_spin, 1),
+            ("Цвет", urgent_color_btn, 1),
+            ("Начертание", self.urgent_style_combo, 1),
+        ]))
+
+        # ---- программа
+        root.addWidget(self._section("Программа"))
+        form2 = QFormLayout()
+        form2.setSpacing(8)
+        form2.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        root.addLayout(form2)
+        self.tray_combo = QComboBox()
+        self.tray_combo.addItems(["Открывать основное окно", "Ничего"])
+        self.tray_combo.setCurrentIndex(self.s.tray_action_index)
+        self.tray_combo.currentIndexChanged.connect(self._on_tray_action)
+        form2.addRow("Клик по иконке в трее", self.tray_combo)
+
         self.autostart_cb = QCheckBox("Запускать вместе с Windows (в трей)")
         self.autostart_cb.setChecked(self.s.autostart)
         self.autostart_cb.toggled.connect(self._on_autostart)
         root.addWidget(self.autostart_cb)
 
-        # обновления с GitHub
         update_row = QHBoxLayout()
         self.auto_update_cb = QCheckBox("Проверять обновления автоматически")
         self.auto_update_cb.setChecked(self.s.auto_update_check)
@@ -203,79 +259,147 @@ class SettingsDialog(QDialog):
         update_row.addWidget(self.auto_update_cb, 1)
         update_row.addWidget(check_btn)
         root.addLayout(update_row)
+        root.addStretch(1)
 
-        # поведение по клику в трее
-        self.tray_combo = QComboBox()
-        self.tray_combo.addItems(["Открывать основное окно", "Ничего"])
-        self.tray_combo.setCurrentIndex(self.s.tray_action_index)
-        self.tray_combo.currentIndexChanged.connect(self._on_tray_action)
-        form.addRow("Действие при клике по иконке трея", self.tray_combo)
-
-        # кнопка предпросмотра
+        # ---- кнопки — вне прокрутки, всегда видны
+        footer = QVBoxLayout()
+        footer.setContentsMargins(12, 0, 12, 0)
+        footer.setSpacing(6)
+        buttons = QHBoxLayout()
         preview_btn = QPushButton("Предпросмотр")
+        preview_btn.setProperty("accent", True)
         preview_btn.clicked.connect(self._on_preview)
-        root.addWidget(preview_btn)
-
-        # сброс к настройкам по умолчанию
-        reset_btn = QPushButton("Сбросить к настройкам по-умолчанию")
+        reset_btn = QPushButton("Сбросить к настройкам по умолчанию")
         reset_btn.clicked.connect(self._reset_defaults)
-        root.addWidget(reset_btn)
-
+        buttons.addWidget(preview_btn, 1)
+        buttons.addWidget(reset_btn, 1)
+        footer.addLayout(buttons)
         hint = QLabel("Все изменения сохраняются сразу.")
-        hint.setStyleSheet("color: #848b96; font-size: 11px;")
-        root.addWidget(hint)
+        hint.setProperty("caption", True)
+        footer.addWidget(hint)
+        outer.addLayout(footer)
+
+        self._fit_to_screen()
 
     # ------------------------------------------------------------------ helpers
 
-    def _color_row(self, form, label, field, initial, on_change):
-        row = QWidget()
-        lay = QHBoxLayout(row)
+    @staticmethod
+    def _section(title: str) -> QLabel:
+        label = QLabel(title)
+        label.setProperty("section", True)
+        return label
+
+    @staticmethod
+    def _captioned(caption: str, widget: QWidget) -> QWidget:
+        """Поле с маленькой подписью над ним."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
-        btn = QPushButton(initial)
-        btn.setFixedWidth(90)
-        btn.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD0D8; border-radius: 4px;"
-            " background-color: " + initial + "; color: "
-            + ("#000" if QColor(initial).lightness() > 128 else "#fff") + " }"
-        )
-        edit = QLineEdit(initial)
-        edit.setMaxLength(9)
-        edit.setFixedWidth(110)
-        lay.addWidget(btn)
-        lay.addWidget(edit)
-        form.addRow(label, row)
-        self._color_refs[field] = (btn, edit, on_change)
+        lay.setSpacing(3)
+        label = QLabel(caption)
+        label.setProperty("caption", True)
+        lay.addWidget(label)
+        lay.addWidget(widget)
+        return box
 
-        def pick():
-            color = QColorDialog.getColor(QColor(edit.text()), self, "Выбор цвета")
-            if color.isValid():
-                hexv = color.name().upper()
-                on_change(hexv)
-                btn.setText(hexv)
-                edit.setText(hexv)
-                self._refresh_color_btn(btn, hexv)
-
-        def typed():
-            text = edit.text().strip()
-            if not HEX_RE.match(text):
-                edit.setText(btn.text())
-                return
-            on_change(text.upper())
-            btn.setText(text.upper())
-            edit.setText(text.upper())
-            self._refresh_color_btn(btn, text.upper())
-
-        btn.clicked.connect(pick)
-        edit.editingFinished.connect(typed)
+    def _captioned_row(self, items) -> QHBoxLayout:
+        """Несколько полей с подписями в одну строку; третий элемент — доля ширины."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for caption, widget, stretch in items:
+            row.addWidget(self._captioned(caption, widget), stretch)
         return row
 
-    def _refresh_color_btn(self, btn, hexv):
-        color = QColor(hexv)
-        fg = "#000" if color.lightness() > 128 else "#fff"
-        btn.setStyleSheet(
-            "QPushButton { border: 1px solid #CBD0D8; border-radius: 4px;"
-            " background-color: " + hexv + "; color: " + fg + " }"
-        )
+    @staticmethod
+    def _pill_spin(value: int, handler) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setProperty("spinPill", True)
+        spin.setRange(1, 8)
+        spin.setValue(value)
+        spin.setAlignment(Qt.AlignCenter)
+        spin.setFixedSize(64, 30)
+        spin.valueChanged.connect(handler)
+        return spin
+
+    def _color_button(self, field: str, on_change) -> QPushButton:
+        """Образец цвета с HEX-кодом; щелчок открывает выбор цвета (там же ввод HEX)."""
+        hexv = str(getattr(self.s, field))
+        btn = QPushButton()
+        btn.setProperty("colorSwatch", True)
+        btn.setFixedHeight(30)
+        btn.setMinimumWidth(64)
+        btn.setCursor(Qt.PointingHandCursor)
+        self._refresh_color_btn(btn, hexv)
+        self._color_refs[field] = (btn, on_change)
+
+        def pick():
+            current = QColor(str(getattr(self.s, field)))
+            color = QColorDialog.getColor(current if current.isValid() else QColor("#FFFFFF"), self, "Выбор цвета")
+            if color.isValid():
+                new = color.name().upper()
+                on_change(new)
+                self._refresh_color_btn(btn, new)
+
+        btn.clicked.connect(pick)
+        return btn
+
+    @staticmethod
+    def _text_color_for(hexv: str) -> str:
+        """Чёрный или белый — что контрастнее на этом фоне (относительная яркость WCAG)."""
+        c = QColor(hexv)
+
+        def lin(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+        lum = 0.2126 * lin(c.red()) + 0.7152 * lin(c.green()) + 0.0722 * lin(c.blue())
+        # контраст с белым (1.05/(L+0.05)) против контраста с чёрным ((L+0.05)/0.05)
+        return "#000000" if (lum + 0.05) / 0.05 >= 1.05 / (lum + 0.05) else "#FFFFFF"
+
+    @classmethod
+    def _refresh_color_btn(cls, btn, hexv):
+        hexv = (hexv or "").strip()
+        text = hexv.upper() if HEX_RE.match(hexv) else hexv  # нестандартное значение показываем как есть
+        fill = QColor(hexv)
+        fill_name = fill.name().upper() if fill.isValid() else "#FFFFFF"
+        btn.setText(text or fill_name)
+        btn.setToolTip(f"{text or fill_name} — нажмите, чтобы выбрать цвет")
+        btn.setStyleSheet(f"QPushButton {{ background-color: {fill_name}; color: {cls._text_color_for(fill_name)}; }}")
+
+    def _fit_to_screen(self) -> None:
+        """Размер по содержимому, но не выше доступной области экрана; минимальная
+        высота маленькая — остальное прокручивается."""
+        content = self._scroll.widget()
+        hint = content.sizeHint()
+        scrollbar = self._scroll.verticalScrollBar().sizeHint().width()
+        footer_h = self.layout().sizeHint().height() - self._scroll.sizeHint().height()
+        margins = self.layout().contentsMargins()
+        # минимальная ширина — чтобы содержимое не обрезалось справа (горизонтальная прокрутка
+        # появляется, только если экран уже этой ширины)
+        min_width = content.minimumSizeHint().width() + scrollbar + margins.left() + margins.right() + 2
+        width = max(560, hint.width() + scrollbar, min_width)
+        height = hint.height() + max(0, footer_h)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            width = min(width, avail.width() - 40)
+            height = min(height, avail.height() - 60)
+        self.setMinimumSize(min(min_width, width), 320)
+        self.resize(width, height)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # окно целиком в пределах экрана (заголовок не уходит за край); экран — тот,
+        # на котором окно сейчас, а не запомненный (важно для мониторов с x < 0)
+        screen = QGuiApplication.screenAt(self.frameGeometry().center()) or self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), avail.left()), max(avail.left(), avail.right() - frame.width() + 1))
+        y = min(max(frame.y(), avail.top()), max(avail.top(), avail.bottom() - frame.height() + 1))
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
 
     # ------------------------------------------------------------------ handlers
 
@@ -329,7 +453,8 @@ class SettingsDialog(QDialog):
 
     def _sync_done_cols_visibility(self) -> None:
         visible = self.done_combo.currentIndex() == 1
-        self.cols_done_spin.setVisible(visible)
+        # прячется вся пара «Done (n)», а не только поле — иначе остаётся висящая подпись
+        (self._cols_done_box or self.cols_done_spin).setVisible(visible)
 
     def _on_monitor(self, index: int) -> None:
         name = self._monitor_items[index] if 0 <= index < len(self._monitor_items) else None
@@ -485,6 +610,8 @@ class SettingsDialog(QDialog):
             self.font_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.style_combo.setCurrentIndex(s.font_style_index)
             self.align_combo.setCurrentIndex(s.alignment_index)
+            self.urgent_size_spin.setValue(s.urgent_fullscreen_size_delta)
+            self.urgent_style_combo.setCurrentIndex(s.urgent_fullscreen_style_index)
             self.opacity_slider.setValue(s.opacity_percent)
             self.opacity_label.setText(f"{s.opacity_percent}%")
             self.autostart_cb.setChecked(s.autostart)
@@ -494,11 +621,8 @@ class SettingsDialog(QDialog):
         finally:
             for w in widgets:
                 w.blockSignals(False)
-        # цветовые строки
-        for field, (btn, edit, _) in self._color_refs.items():
-            hexv = str(getattr(s, field, "#FFFFFF"))
-            edit.setText(hexv)
-            btn.setText(hexv)
-            self._refresh_color_btn(btn, hexv)
+        # образцы цветов
+        for field, (btn, _) in self._color_refs.items():
+            self._refresh_color_btn(btn, str(getattr(s, field, "#FFFFFF")))
         # тема
         self.setStyleSheet(build_stylesheet(s.theme))

@@ -129,6 +129,16 @@ def build_stylesheet(theme: str) -> str:
         color: {c['text']};
     }}
     QSpinBox[spinPill="true"]:focus {{ border: 2px solid {c['accent']}; }}
+    QPushButton[colorSwatch="true"] {{
+        border: 1px solid {c['input_border']};
+        border-radius: 8px;
+        padding: 0;
+        font-size: 11px;
+        font-weight: 600;
+    }}
+    QLabel[caption="true"] {{ color: {c['muted']}; font-size: 11px; }}
+    QLabel[section="true"] {{ color: {c['text']}; font-size: 13px; font-weight: 600; padding-top: 6px; }}
+    QScrollArea[settingsScroll="true"] > QWidget > QWidget {{ background: transparent; }}
     QComboBox {{
         background: {c['input_bg']};
         border: 1px solid {c['input_border']};
