@@ -54,9 +54,13 @@ def inspect_embedded(path) -> tuple[int, dict | None, bool]:
         return size, None, False
     with open(path, "rb") as f:
         f.seek(size - TRAILER.size)
-        length, crc, magic = TRAILER.unpack(f.read(TRAILER.size))
+        tail = f.read(TRAILER.size)
+        length, crc, magic = TRAILER.unpack(tail)
         if magic != MAGIC:
-            return size, None, False
+            # файл кончается нулями — типичный след выдернутой флешки (недописанные кластеры):
+            # хвост, скорее всего, был и пропал. Программа-то запустится (загрузчик PyInstaller
+            # находит свой архив раньше), а вот данные потеряны — об этом надо сказать
+            return size, None, tail == b"\x00" * TRAILER.size
         if length > size - TRAILER.size:
             return size, None, True
         base = size - TRAILER.size - length
@@ -194,6 +198,9 @@ class EmbeddedStore:
         self._pending_gen: str | None = None  # поколение, записанное в скачанное обновление
         self._embedded_rev: int = 0
         self._work_blocked = False            # рабочую копию нельзя перезаписывать (см. _set_aside)
+        self._exe_unreadable: str | None = None
+        self._work_ok = True                  # последняя запись рабочей копии удалась
+        self.fallback_path: Path | None = None  # куда сохранены данные, если в EXE записать не удалось
         self._load()
 
     # ---- загрузка
@@ -212,13 +219,27 @@ class EmbeddedStore:
 
     def _set_aside(self, tag: str, message: str) -> None:
         """Отложить рабочую копию в отдельный файл (не удалять — там могут быть данные)."""
+        try:
+            digest = hashlib.sha1(self.work_file.path.read_bytes()).hexdigest()[:10]
+        except OSError:
+            digest = uuid.uuid4().hex[:10]
+        # имя по содержимому: одна и та же копия откладывается один раз, а не при каждом запуске
+        existing = list(self.work_dir.glob(f"work-{self._key}-{tag}-*-{digest}.json"))
+        if existing:
+            _unlink_quietly(self.work_file.path)
+            if self.work_file.path.exists():
+                self._work_blocked = True   # уже отложена, но оригинал не удалить — не трогаем
+            return
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}-{uuid.uuid4().hex[:6]}.json"
+        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}-{digest}.json"
         try:
             os.replace(self.work_file.path, target)
         except OSError:
             try:
                 shutil.copy2(self.work_file.path, target)   # переименовать не дали — хотя бы копия
+                _unlink_quietly(self.work_file.path)
+                if self.work_file.path.exists():
+                    self._work_blocked = True   # копия есть, оригинал держат — не перезаписывать
             except OSError as e:
                 # и скопировать не вышло: тогда рабочую копию не трогаем вовсе, чтобы первое же
                 # сохранение не затёрло эти данные (изменения этой сессии живут до выхода)
@@ -231,11 +252,18 @@ class EmbeddedStore:
     def _load(self) -> None:
         try:
             _, embedded, damaged = inspect_embedded(self.exe)
-        except OSError:
+        except OSError as e:
+            # свой же EXE не прочитался: данные в нём могут быть, просто недоступны сейчас.
+            # Писать в EXE в этой сессии нельзя — иначе запись отрезала бы настоящий хвост
             embedded, damaged = None, False
+            self._exe_unreadable = f"не удалось прочитать программу: {e}"
         e_gen = embedded.get("gen") if embedded else None
         e_rev = _as_int(embedded.get("rev")) if embedded else 0
         work = self._read_work()
+        if embedded is None and not damaged and work is not None and work.get("base_gen"):
+            # рабочая копия продолжает данные, которые были в EXE, а в EXE их нет — хвост
+            # потерян (обрезан или испорчен целиком); это повреждение, а не «чистый» EXE
+            damaged = True
 
         if work is not None and embedded is not None and \
                 _section(work, "settings") == _section(embedded, "settings") and \
@@ -249,8 +277,13 @@ class EmbeddedStore:
         if damaged:
             if work is not None:
                 doc = work
+                try:
+                    when = time.strftime("%d.%m.%Y %H:%M", time.localtime(self.work_file.path.stat().st_mtime))
+                except OSError:
+                    when = "неизвестно когда"
                 self.notices.append("Данные внутри программы повреждены — восстановлены из рабочей "
-                                    "копии на этом компьютере")
+                                    f"копии на этом компьютере (сохранена {when}). Если программой "
+                                    "пользовались на другом ПК, эти данные могут быть старее")
             else:
                 self.notices.append("Данные внутри программы повреждены и не прочитаны — список начат "
                                     "заново. Если у вас есть экспорт, его можно импортировать")
@@ -337,7 +370,9 @@ class EmbeddedStore:
             return
         try:
             self.work_file.save(self._work_payload())
+            self._work_ok = True
         except OSError as e:
+            self._work_ok = False
             self.last_error = f"рабочая копия: {e}"
 
     @property
@@ -355,6 +390,10 @@ class EmbeddedStore:
         if not self.dirty:
             self._drop_work()
             return True
+        if self._exe_unreadable:
+            self.last_error = self._exe_unreadable
+            self._save_fallback()
+            return False
         gen = uuid.uuid4().hex
         embed = self.exe.with_name(self.exe.name + EMBED_SUFFIX)
         old = self.exe.with_name(self.exe.name + OLD_SUFFIX)
@@ -365,6 +404,7 @@ class EmbeddedStore:
         except OSError as e:
             _unlink_quietly(embed)
             self.last_error = f"запись в программу: {e}"
+            self._save_fallback()
             return False
         try:
             _replace_with_retry(embed, self.exe)
@@ -375,6 +415,7 @@ class EmbeddedStore:
             except OSError:
                 pass        # .embed не удаляем: если не вернулся и прежний EXE, в нём наши данные
             self.last_error = f"запись в программу: {e}"
+            self._save_fallback()
             return False
         self._base_gen = gen
         self._pending_gen = None
@@ -398,14 +439,27 @@ class EmbeddedStore:
         write_exe_with_data(path, tmp, self._embedded_doc(gen))
         os.replace(tmp, path)
         self._pending_gen = gen
-        if self._work_blocked:
+        # не записалась — не страшно и удалять её нельзя: в ней тот же текущий набор данных,
+        # что ушёл в обновление; после установки её тихо уберёт проверка «то же содержимое»,
+        # а если установка не удастся и случится сбой — из неё восстановятся правки сессии
+        self._write_work()
+
+    def _save_fallback(self) -> None:
+        """В EXE записать не удалось — убедиться, что данные сессии лежат хоть где-то на диске,
+        и запомнить где (для сообщения пользователю)."""
+        self.fallback_path = None
+        if not self._work_blocked and self._work_ok and self.work_file.exists():
+            self.fallback_path = self.work_file.path
             return
-        try:
-            self.work_file.save(self._work_payload())
-        except OSError:
-            # не записалась — лучше убрать устаревшую копию, чем получить ложный «конфликт»
-            # после установки; если не убрать и её, обновление не продолжаем
-            self.work_file.path.unlink(missing_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for target in (self.work_dir / f"work-{self._key}-session-{stamp}-{uuid.uuid4().hex[:6]}.json",
+                       self.exe.with_name(self.exe.name + ".unsaved.json")):
+            try:
+                JsonFile(target).save(self._work_payload())
+                self.fallback_path = target
+                return
+            except OSError:
+                continue
 
     def _drop_work(self) -> None:
         if self._work_blocked:

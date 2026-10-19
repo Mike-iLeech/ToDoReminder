@@ -1259,6 +1259,103 @@ def test_embedded_store():
     s77 = D.EmbeddedStore(exe7, work_dir=d7 / "w2")
     check("повреждённые данные внутри программы — с сообщением", any("повреждены" in n for n in s77.notices))
 
+    # выдернутая флешка: конец EXE обнулён / обрезан
+    d8 = Path(tempfile.mkdtemp())
+    exe8 = d8 / "ToDoReminder.exe"
+    exe8.write_bytes(program)
+    s80 = D.EmbeddedStore(exe8, work_dir=d8 / "w")
+    s80.save_tasks({"tasks": [{"id": "1", "title": "до сбоя"}]})
+    s80.finalize()
+    s81 = D.EmbeddedStore(exe8, work_dir=d8 / "w")
+    s81.save_tasks({"tasks": [{"id": "1", "title": "правки перед выдёргиванием"}]})   # сбой: рабочая копия есть
+    raw8 = bytearray(exe8.read_bytes())
+    raw8[-20:] = b"\x00" * 20
+    exe8.write_bytes(bytes(raw8))
+    s82 = D.EmbeddedStore(exe8, work_dir=d8 / "w")
+    check("обнулённый конец + рабочая копия: восстановление, а не ложный конфликт",
+          s82.load_tasks()["tasks"][0]["title"] == "правки перед выдёргиванием"
+          and any("повреждены" in n for n in s82.notices) and not list((d8 / "w").glob("*conflict*")))
+    zeroed = d8 / "zeroed.exe"
+    zeroed.write_bytes(program + D.pack({"rev": 1, "gen": "g", "settings": {}, "tasks": {}})[:-28] + b"\x00" * 28)
+    s83 = D.EmbeddedStore(zeroed, work_dir=d8 / "w-other")
+    check("обнулённый конец без рабочей копии — с сообщением о повреждении",
+          any("повреждены" in n for n in s83.notices))
+
+    # embed_into: рабочую копию не записать → установка упала → сбой: правки сессии не пропали
+    d9 = Path(tempfile.mkdtemp())
+    exe9 = d9 / "ToDoReminder.exe"
+    exe9.write_bytes(program)
+    s90 = D.EmbeddedStore(exe9, work_dir=d9 / "w")
+    s90.save_tasks({"tasks": [{"id": "1", "title": "сессия"}]})
+    new9 = d9 / "ToDoReminder.exe.new"
+    new9.write_bytes(b"MZ" + os.urandom(1000))
+    orig_save = D.JsonFile.save
+    D.JsonFile.save = lambda self, data: (_ for _ in ()).throw(OSError("диск занят"))
+    try:
+        s90.embed_into(new9)
+    finally:
+        D.JsonFile.save = orig_save
+    s91 = D.EmbeddedStore(exe9, work_dir=d9 / "w")
+    check("сбой записи рабочей копии в embed_into не теряет правки сессии",
+          s91.load_tasks()["tasks"][0]["title"] == "сессия")
+
+    # в EXE записать нельзя, рабочую копию тоже — данные сессии уходят в запасной файл
+    s92 = D.EmbeddedStore(exe9, work_dir=d9 / "w")
+    s92._work_blocked = True
+    s92.save_tasks({"tasks": [{"id": "1", "title": "запасной файл"}]})
+    orig_w = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("только чтение"))
+    try:
+        ok = s92.finalize()
+    finally:
+        D.write_exe_with_data = orig_w
+    fb = s92.fallback_path
+    check("если некуда — данные в запасном файле, и он назван",
+          not ok and fb is not None and "запасной файл" in Path(fb).read_text(encoding="utf-8"))
+
+    # свой EXE не прочитался — в этой сессии в него не пишем (не отрезать настоящий хвост)
+    exe9b = d9 / "keep.exe"
+    exe9b.write_bytes(program + D.pack({"rev": 3, "gen": "real", "settings": {}, "tasks": {"tasks": [{"id": "r", "title": "настоящие"}]}}))
+    orig_i = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        s93 = D.EmbeddedStore(exe9b, work_dir=d9 / "w3")
+    finally:
+        D.inspect_embedded = orig_i
+    s93.save_tasks({"tasks": []})
+    before = exe9b.read_bytes()
+    check("непрочитанный свой EXE не перезаписывается", not s93.finalize() and exe9b.read_bytes() == before)
+
+    # конфликтная копия, которую нельзя удалить, не плодится при каждом запуске
+    d10 = Path(tempfile.mkdtemp())
+    exe10 = d10 / "ToDoReminder.exe"
+    exe10.write_bytes(program)
+    s100 = D.EmbeddedStore(exe10, work_dir=d10 / "w")
+    s100.save_tasks({"tasks": [{"id": "1", "title": "a"}]})
+    s100.finalize()
+    D.EmbeddedStore(exe10, work_dir=d10 / "w").save_tasks({"tasks": [{"id": "1", "title": "чужая ветка"}]})
+    s100b = D.EmbeddedStore(exe10, work_dir=d10 / "other")   # «другой ПК» меняет EXE
+    s100b.save_tasks({"tasks": [{"id": "1", "title": "B"}]})
+    s100b.finalize()
+    orig_rep = os.replace
+
+    def no_move(src, dst, *a, **k):
+        if str(src).endswith(".json") and "work-" in str(src):
+            raise PermissionError("держит синхронизатор")
+        return orig_rep(src, dst, *a, **k)
+
+    orig_unlink = D._unlink_quietly
+    D.os.replace = no_move
+    D._unlink_quietly = lambda p: None
+    try:
+        for _ in range(3):
+            D.EmbeddedStore(exe10, work_dir=d10 / "w")
+    finally:
+        D.os.replace = orig_rep
+        D._unlink_quietly = orig_unlink
+    check("неудаляемая конфликтная копия откладывается один раз",
+          len(list((d10 / "w").glob("*conflict*"))) == 1)
+
     # повреждённое поле длины при целой метке не обрезает программу
     d4 = Path(tempfile.mkdtemp())
     exe4 = d4 / "ToDoReminder.exe"
@@ -1380,6 +1477,24 @@ def test_finalize_on_exit():
         ctx.finalize_storage()   # aboutToQuit после quit() — повторно не пишет
         check("выход записывает данные внутрь EXE ровно один раз", fake.finalized == 1)
         check("перед записью в EXE настройки сброшены в хранилище", any(k == "s" for k, _ in fake.saved))
+
+        # сохранить некуда (ни в EXE, ни на диск) — выход отменяется, программа работает дальше
+        from PySide6.QtWidgets import QMessageBox
+        fake3 = FakeStore()
+        fake3.finalize = lambda: False
+        fake3.fallback_path = None
+        fake3.last_error = "нет места"
+        S._STORE = fake3
+        ctx3 = AppContext(app)
+        quits = []
+        ctx3.app = type("A", (), {"quit": lambda self: quits.append(1), "processEvents": lambda self: None})()
+        orig_crit = QMessageBox.critical
+        QMessageBox.critical = staticmethod(lambda *a, **k: None)
+        try:
+            ctx3.quit()
+        finally:
+            QMessageBox.critical = orig_crit
+        check("если сохранить некуда — выход отменяется", not quits and not ctx3._storage_finalized)
 
         fake2 = FakeStore()
         S._STORE = fake2

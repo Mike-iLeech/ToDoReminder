@@ -281,24 +281,39 @@ class AppContext:
             self.main_window._quitting = True
             if save:
                 self.main_window._save_position()
-        if self.reminders is not None:
-            self.reminders.shutdown()
-        if self.updates is not None:
-            self.updates.shutdown()
+        # данные — до остановки таймеров: если сохранить некуда, выход отменяется,
+        # и программа должна продолжить работать как обычно
         if save:
             if not self.finalize_storage():
                 # не молчать: иначе пользователь унесёт EXE со старыми данными
                 from PySide6.QtWidgets import QMessageBox
 
                 error = getattr(self.data_store, "last_error", None) or "неизвестная ошибка"
+                fallback = getattr(self.data_store, "fallback_path", None)
+                if fallback is None:
+                    QMessageBox.critical(
+                        None, "ToDo Reminder",
+                        "Не удалось сохранить дела и настройки ни внутрь программы, ни на диск:\n"
+                        f"{error}\n\nПрограмма не будет закрыта — сохраните список через «Экспорт» "
+                        "и устраните причину (например, нет места на диске).")
+                    self._storage_finalized = False   # следующая попытка выхода попробует снова
+                    if self.main_window is not None:
+                        self.main_window._quitting = False
+                        self.main_window.focus_input()
+                    return
                 QMessageBox.warning(
                     None, "ToDo Reminder",
                     "Не удалось записать дела и настройки внутрь программы:\n"
-                    f"{error}\n\nОни сохранены на этом компьютере и будут записаны при следующем "
-                    "выходе. Если переносите программу на другой ПК — сначала устраните причину "
-                    "(например, папка только для чтения или нет места на диске).")
+                    f"{error}\n\nОни сохранены на этом компьютере в файле\n{fallback}\n"
+                    "и будут записаны в программу при следующем выходе. Если переносите программу "
+                    "на другой ПК — сначала устраните причину (например, папка только для чтения "
+                    "или нет места на диске).")
         else:
             self.settings_manager.discard_pending()
+        if self.reminders is not None:
+            self.reminders.shutdown()
+        if self.updates is not None:
+            self.updates.shutdown()
         if self.tray is not None:
             self.tray.hide()
             self.app.processEvents()
