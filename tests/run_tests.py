@@ -1343,6 +1343,107 @@ def test_embedded_store():
           s_un3.load_tasks()["tasks"][0]["title"] == "во время занятого"
           and not list((dun / "w").glob("*conflict*")))
 
+    # ---- выбор между копиями (рабочая + запасные), ревью 5
+    def fresh(name):
+        dd = Path(tempfile.mkdtemp())
+        ee = dd / "ToDoReminder.exe"
+        ee.write_bytes(program)
+        return dd, ee
+
+    def put_session(dd, ee, title, rev, base_gen, **extra):
+        st_ = D.EmbeddedStore(ee, work_dir=dd / "probe-key")  # только чтобы узнать ключ
+        key = st_._key
+        sess = dd / "w" / f"work-{key}-session-20260101-000000-{rev:06d}.json"
+        sess.parent.mkdir(parents=True, exist_ok=True)
+        sess.write_text(json.dumps(dict({"rev": rev, "base_gen": base_gen, "pending_gen": None, "settings": {},
+                                         "tasks": {"tasks": [{"id": "1", "title": title}]}}, **extra),
+                                   ensure_ascii=False), encoding="utf-8")
+        return sess
+
+    # E2: повреждён хвост; своя рабочая копия (сбой) + чужой запасной файл с бОльшим rev
+    dE, eE = fresh("e2")
+    sE = D.EmbeddedStore(eE, work_dir=dE / "w")
+    sE.save_tasks({"tasks": [{"id": "1", "title": "base"}]})
+    sE.finalize()
+    sE2 = D.EmbeddedStore(eE, work_dir=dE / "w")
+    sE2.save_tasks({"tasks": [{"id": "1", "title": "OWN-CRASH"}]})          # сбой
+    put_session(dE, eE, "FOREIGN-OLD", 50, "чужое-поколение")
+    rawE = bytearray(eE.read_bytes())
+    rawE[-D.TRAILER.size - 3] ^= 0xFF
+    eE.write_bytes(bytes(rawE))
+    sE3 = D.EmbeddedStore(eE, work_dir=dE / "w")
+    all_text = "".join(p.read_text(encoding="utf-8") for p in (dE / "w").glob("*.json"))
+    check("повреждён хвост: выбрана своя рабочая копия, а не чужой файл",
+          sE3.load_tasks()["tasks"][0]["title"] == "OWN-CRASH")
+    check("повреждён хвост: чужой файл отложен, а не удалён", "FOREIGN-OLD" in all_text
+          and list((dE / "w").glob("*conflict*")))
+    sE3.finalize()
+    check("после выхода чужие данные не пропали",
+          "FOREIGN-OLD" in "".join(p.read_text(encoding="utf-8") for p in (dE / "w").glob("*.json")))
+
+    # N3: чужой запасной файл — сообщение один раз, а не при каждом запуске
+    dM, eM = fresh("m1")
+    sM = D.EmbeddedStore(eM, work_dir=dM / "w")
+    sM.save_tasks({"tasks": [{"id": "1", "title": "в EXE"}]})
+    sM.finalize()
+    put_session(dM, eM, "чужие правки", 7, "другое")
+    counts = [len(D.EmbeddedStore(eM, work_dir=dM / "w").notices) for _ in range(3)]
+    check("чужой запасной файл — сообщение один раз", counts == [1, 0, 0], str(counts))
+
+    # N4: только для чтения + остаток папки data / лишний запасной файл — без ложной ошибки и без накопления
+    dF, eF = fresh("f1")
+    sF = D.EmbeddedStore(eF, work_dir=dF / "w")
+    sF.save_tasks({"tasks": [{"id": "1", "title": "x"}]})
+    sF.finalize()
+    (dF / "data").mkdir()
+    (dF / "data" / "tasks.json").write_text('{"tasks": [{"id": "1", "title": "старое"}]}', encoding="utf-8")
+    emb_F = D.read_embedded(eF)[1]
+    put_session(dF, eF, "x", emb_F["rev"], emb_F["gen"])   # тот же текст, что в EXE
+    orig_w3 = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("только чтение"))
+    try:
+        results = []
+        for _ in range(3):
+            st_f = D.EmbeddedStore(eF, work_dir=dF / "w", legacy_dir=dF / "data")
+            results.append((st_f.finalize(), len(list((dF / "w").glob("*session*")))))
+    finally:
+        D.write_exe_with_data = orig_w3
+    check("только для чтения без изменений: нет ложной ошибки и файлы не копятся",
+          results == [(True, 0), (True, 0), (True, 0)], str(results))
+    check("остаток папки data удалён без перезаписи EXE", not (dF / "data").exists())
+
+    # N5: EXE не читался, копий не было — правки потом откладываются с понятным сообщением
+    dU, eU = fresh("u1")
+    sU = D.EmbeddedStore(eU, work_dir=dU / "w")
+    sU.save_tasks({"tasks": [{"id": "1", "title": "реальные"}]})
+    sU.finalize()
+    orig_ins2 = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        sU2 = D.EmbeddedStore(eU, work_dir=dU / "w")
+        sU2.save_tasks({"tasks": [{"id": "1", "title": "правки вслепую"}]})
+        sU2.finalize()
+    finally:
+        D.inspect_embedded = orig_ins2
+    sU3 = D.EmbeddedStore(eU, work_dir=dU / "w")
+    check("после «слепой» сессии реальные данные целы", sU3.load_tasks()["tasks"][0]["title"] == "реальные")
+    check("«слепые» правки отложены с сообщением про «Импорт»",
+          any("не читались" in n and "Импорт" in n for n in sU3.notices) and list((dU / "w").glob("*unsaved*")))
+
+    # N6: чистый EXE (заменили релизом) + .unsaved.json с поколением → восстановление, не «конфликт»
+    dN, eN = fresh("n6")
+    sN = D.EmbeddedStore(eN, work_dir=dN / "w")
+    sN.save_tasks({"tasks": [{"id": "1", "title": "было"}]})
+    sN.finalize()
+    gN = D.read_embedded(eN)[1]["gen"]
+    eN.write_bytes(program)                       # EXE заменили чистым релизом
+    eN.with_name(eN.name + ".unsaved.json").write_text(json.dumps(
+        {"rev": 5, "base_gen": gN, "pending_gen": None, "settings": {},
+         "tasks": {"tasks": [{"id": "1", "title": "из .unsaved"}]}}, ensure_ascii=False), encoding="utf-8")
+    sN2 = D.EmbeddedStore(eN, work_dir=dN / "w")
+    check("чистый EXE + .unsaved.json с поколением — восстановление",
+          sN2.load_tasks()["tasks"][0]["title"] == "из .unsaved" and not list((dN / "w").glob("*conflict*")))
+
     # импорт понимает формат рабочей/запасной копии
     from import_export import load_tasks as _load_tasks_file
     copy_file = dfb / "copy.json"

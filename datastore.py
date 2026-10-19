@@ -210,64 +210,30 @@ class EmbeddedStore:
         self._work_ok = True                  # последняя запись рабочей копии удалась
         self.fallback_path: Path | None = None  # куда сохранены данные, если в EXE записать не удалось
         self._obsolete_files: list[Path] = []   # учтённые запасные файлы — убрать после записи в EXE
+        self._base_unknown = False             # EXE не читался и копий не было — «основа» правок неизвестна
         self._load()
 
     # ---- загрузка
+    #
+    # «Копии» — рабочая копия (work-<ключ>.json) и запасные файлы прошлых неудачных выходов
+    # (work-<ключ>-session-*.json, <exe>.unsaved.json). У всех один формат: данные + rev +
+    # base_gen/pending_gen (от какого поколения данных в EXE они пошли). Правила:
+    #   1. копия с тем же содержимым, что в EXE, — лишняя: удаляется сразу;
+    #   2. копия «своей линии» (поколение совпадает с EXE): берётся самая свежая, если она новее
+    #      EXE (прошлый выход не успел записать); старшие свои копии уже перекрыты — удаляются;
+    #   3. копия чужой линии (EXE меняли в другом месте) или сделанная, когда EXE не читался, —
+    #      не выбирается и не удаляется: один раз откладывается в …-conflict/unsaved-<хэш>.json
+    #      с сообщением (открыть можно через «Импорт»);
+    #   4. хвост EXE повреждён — опора на рабочую копию этого ПК и копии её линии.
 
-    def _read_work(self) -> dict | None:
-        if not self.work_file.exists():
-            return None
-        try:
-            data = json.loads(self.work_file.path.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError):
-            data = None
-        if not isinstance(data, dict) or not isinstance(data.get("rev"), int):
-            self._set_aside("damaged", "Рабочая копия данных повреждена и отложена")
-            return None
-        return data
-
-    def _set_aside(self, tag: str, message: str) -> None:
-        """Отложить рабочую копию в отдельный файл (не удалять — там могут быть данные)."""
-        try:
-            digest = hashlib.sha1(self.work_file.path.read_bytes()).hexdigest()[:10]
-        except OSError:
-            digest = uuid.uuid4().hex[:10]
-        # имя по содержимому: одна и та же копия откладывается один раз, а не при каждом запуске
-        existing = list(self.work_dir.glob(f"work-{self._key}-{tag}-*-{digest}.json"))
-        if existing:
-            _unlink_quietly(self.work_file.path)
-            if self.work_file.path.exists():
-                self._work_blocked = True   # уже отложена, но оригинал не удалить — не трогаем
-                self.notices.append(f"Рабочую копию данных не удаётся заменить ({self.work_file.path}) — "
-                                    "в этой сессии защита от сбоя не работает, выходите из программы "
-                                    "через меню трея, чтобы данные записались")
-            return
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}-{digest}.json"
-        try:
-            os.replace(self.work_file.path, target)
-        except OSError:
-            try:
-                shutil.copy2(self.work_file.path, target)   # переименовать не дали — хотя бы копия
-                _unlink_quietly(self.work_file.path)
-                if self.work_file.path.exists():
-                    self._work_blocked = True   # копия есть, оригинал держат — не перезаписывать
-            except OSError as e:
-                # и скопировать не вышло: тогда рабочую копию не трогаем вовсе, чтобы первое же
-                # сохранение не затёрло эти данные (изменения этой сессии живут до выхода)
-                self._work_blocked = True
-                self.notices.append(f"{message}, но отложить её не удалось ({e}); файл оставлен: "
-                                    f"{self.work_file.path}")
-                return
-        self.notices.append(f"{message}: {target}")
-
-    def _fallback_files(self) -> list[Path]:
-        """Запасные файлы, куда сохранялись данные, когда в EXE записать не удалось."""
-        found = sorted(self.work_dir.glob(f"work-{self._key}-session-*.json")) if self.work_dir.exists() else []
+    def _copy_paths(self) -> list[Path]:
+        paths = [self.work_file.path] if self.work_file.exists() else []
+        if self.work_dir.exists():
+            paths += sorted(self.work_dir.glob(f"work-{self._key}-session-*.json"))
         unsaved = self.exe.with_name(self.exe.name + ".unsaved.json")
         if unsaved.exists():
-            found.append(unsaved)
-        return found
+            paths.append(unsaved)
+        return paths
 
     @staticmethod
     def _read_copy(path: Path) -> dict | None:
@@ -288,6 +254,43 @@ class EmbeddedStore:
         except OSError:
             return "неизвестно когда"
 
+    def _remove_copy(self, path: Path) -> None:
+        if path == self.work_file.path:
+            self._drop_work()
+        else:
+            _unlink_quietly(path)
+
+    def _set_aside(self, path: Path, tag: str, message: str) -> None:
+        """Отложить копию в отдельный файл (не удалять — там могут быть данные). Одна и та же
+        копия откладывается один раз: имя файла — по хэшу содержимого."""
+        is_work = path == self.work_file.path
+        try:
+            digest = hashlib.sha1(path.read_bytes()).hexdigest()[:10]
+        except OSError:
+            digest = uuid.uuid4().hex[:10]
+        if list(self.work_dir.glob(f"work-{self._key}-{tag}-*-{digest}.json")):
+            _unlink_quietly(path)                   # уже отложена раньше — оригинал лишний
+            if is_work and path.exists():
+                self._work_blocked = True
+            return
+        target = self.work_dir / f"work-{self._key}-{tag}-{time.strftime('%Y%m%d-%H%M%S')}-{digest}.json"
+        try:
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            os.replace(path, target)
+        except OSError:
+            try:
+                shutil.copy2(path, target)          # переименовать не дали — хотя бы копия
+                _unlink_quietly(path)
+            except OSError as e:
+                if is_work:
+                    # рабочую копию не перезаписывать и не удалять, чтобы не затереть эти данные
+                    self._work_blocked = True
+                self.notices.append(f"{message}, но отложить не удалось ({e}); файл оставлен: {path}")
+                return
+            if is_work and path.exists():
+                self._work_blocked = True
+        self.notices.append(f"{message}: {target}")
+
     def _load(self) -> None:
         try:
             _, embedded, damaged = inspect_embedded(self.exe)
@@ -296,104 +299,99 @@ class EmbeddedStore:
             return
         e_gen = embedded.get("gen") if embedded else None
         e_rev = _as_int(embedded.get("rev")) if embedded else 0
-        work = self._read_work()
-        if embedded is None and not damaged and work is not None and work.get("base_gen"):
-            # рабочая копия продолжает данные, которые были в EXE, а в EXE их нет — хвост
-            # потерян (обрезан или испорчен целиком); это повреждение, а не «чистый» EXE
+        work_path = self.work_file.path
+
+        copies: list[tuple[Path, dict]] = []
+        for path in self._copy_paths():
+            data = self._read_copy(path)
+            if data is None:
+                self._set_aside(path, "damaged", "Файл с копией данных повреждён и отложен")
+            elif embedded is not None and self._same_content(data, embedded):
+                self._remove_copy(path)             # правило 1
+            else:
+                copies.append((path, data))
+
+        def gens(d: dict) -> set:
+            return {d.get("base_gen"), d.get("pending_gen")} - {None}
+
+        if embedded is None and not damaged and any(d.get("base_gen") for _, d in copies):
+            # копии продолжают данные, которые были в EXE, а в EXE их нет — хвост потерян
+            # (обрезан или испорчен целиком); это повреждение, а не «чистый» EXE
             damaged = True
 
-        if work is not None and embedded is not None and self._same_content(work, embedded):
-            # в рабочей копии то же, что в программе (например, её не дал удалить антивирус) —
-            # ни восстанавливать, ни откладывать нечего
-            self._drop_work()
-            work = None
-
-        def continues(copy: dict) -> bool:
-            pending = copy.get("pending_gen")
-            return copy.get("base_gen") == e_gen or bool(pending and pending == e_gen)
-
-        # запасные файлы прошлых неудачных выходов — такие же копии, как рабочая
-        fallbacks = []
-        for path in self._fallback_files():
-            copy = self._read_copy(path)
-            if copy is None:
-                self.notices.append(f"Не удалось прочитать файл с несохранёнными данными: {path}")
-            elif embedded is not None and self._same_content(copy, embedded):
-                self._obsolete_files.append(path)       # уже внутри программы — убрать при выходе
-            else:
-                fallbacks.append((path, copy))
-
-        doc = None
+        chosen = None
+        own: list[tuple[Path, dict]] = []
         if damaged:
-            candidates = ([(self.work_file.path, work)] if work is not None else []) + fallbacks
-            if candidates:
-                path, best = max(candidates, key=lambda c: c[1]["rev"])
-                doc = best
-                if path != self.work_file.path:
-                    self._obsolete_files.append(path)
+            anchor = next((c for c in copies if c[0] == work_path), None)
+            if anchor is None and copies:
+                anchor = max(copies, key=lambda c: c[0].stat().st_mtime if c[0].exists() else 0)
+            if anchor is not None:
+                line = gens(anchor[1])
+                own = [c for c in copies if c is anchor or (line and gens(c[1]) & line)]
+                chosen = max(own, key=lambda c: c[1]["rev"])
                 self.notices.append("Данные внутри программы повреждены — восстановлены из копии на этом "
-                                    f"компьютере (сохранена {self._modified(path)}). Если программой "
+                                    f"компьютере (сохранена {self._modified(chosen[0])}). Если программой "
                                     "пользовались на другом ПК, эти данные могут быть старее")
-                for other_path, _ in candidates:
-                    if other_path not in (path, self.work_file.path):
-                        self._obsolete_files.append(other_path)
             else:
                 self.notices.append("Данные внутри программы повреждены и не прочитаны — список начат "
                                     "заново. Если у вас есть экспорт, его можно импортировать")
         else:
-            own = []
-            if work is not None:
-                if continues(work):
-                    own.append((self.work_file.path, work))
-                else:
-                    self._set_aside("conflict", "Найдены несохранённые изменения от другой копии данных — "
-                                                "программа уже содержит более новые. Старые изменения "
-                                                "отложены в файл")
-            for path, copy in fallbacks:
-                if continues(copy):
-                    own.append((path, copy))
-                else:
-                    self.notices.append("Найдены несохранённые изменения от другой копии данных "
-                                        f"(сохранены {self._modified(path)}), программа уже содержит "
-                                        f"более новые. Файл оставлен: {path}")
+            own = [c for c in copies if not c[1].get("base_unknown")
+                   and (c[1].get("base_gen") == e_gen or (c[1].get("pending_gen") and c[1].get("pending_gen") == e_gen))]
             newer = [c for c in own if embedded is None or c[1]["rev"] > e_rev]
             if newer:
-                path, best = max(newer, key=lambda c: c[1]["rev"])
-                doc = best
+                chosen = max(newer, key=lambda c: c[1]["rev"])
                 self.notices.append("Восстановлены изменения, которые не успели записаться "
                                     "в программу при прошлом выходе")
-            for path, _ in own:
-                if path != self.work_file.path:
-                    self._obsolete_files.append(path)   # учтены (или устарели) — убрать после записи в EXE
 
-        if doc is None and embedded is not None:
-            doc = embedded
-        if doc is None:
-            doc = {"rev": 0, "settings": {}, "tasks": {}}
+        for c in copies:
+            if c is chosen:
+                continue
+            path, data = c
+            if c in own:
+                if damaged:
+                    self._obsolete_files.append(path)   # своя, но старше выбранной — убрать после записи
+                else:
+                    self._remove_copy(path)             # правило 2: перекрыта EXE или выбранной копией
+            elif data.get("base_unknown"):
+                self._set_aside(path, "unsaved", "Изменения, сделанные, когда данные программы не "
+                                                 f"читались ({self._modified(path)}), отложены — их можно "
+                                                 "открыть через «Импорт»")
+            else:
+                self._set_aside(path, "conflict", "Найдены несохранённые изменения от другой копии данных "
+                                                  f"({self._modified(path)}) — в программе уже другие данные. "
+                                                  "Эти изменения отложены — их можно открыть через «Импорт»")
 
+        doc = chosen[1] if chosen else (embedded or {"rev": 0, "settings": {}, "tasks": {}})
         self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
                      "tasks": _section(doc, "tasks")}
         self._base_gen = e_gen
         self._embedded_rev = e_rev if embedded is not None else 0
-        if self._obsolete_files and not self.dirty:
-            self._embedded_rev = -1     # данные уже внутри, но запасные файлы надо убрать при выходе
-        if doc is not embedded and doc is not work:
-            self._write_work()          # подхваченный запасной файл становится рабочей копией
+        if damaged:
+            self._embedded_rev = -1         # переписать испорченный хвост при выходе
+        if chosen is not None and chosen[0] != work_path:
+            self._obsolete_files.append(chosen[0])   # запасной файл → рабочая копия, убрать после записи
+            self._write_work()
         self._merge_legacy()
 
     def _load_unreadable(self, error: OSError) -> None:
         """Свой же EXE не прочитался (занят, сбой диска): данные в нём могут быть, просто сейчас
         недоступны. Писать в EXE в этой сессии нельзя — иначе запись отрезала бы настоящий хвост.
-        Работаем с рабочей копией (если есть), сохраняя её «родословную», чтобы следующий
-        запуск узнал в ней продолжение своих данных."""
+        Работаем с самой свежей копией (если есть), сохраняя её «родословную»; если копий нет,
+        правки помечаются как сделанные «без основы» — в следующий раз они будут отложены с
+        понятным сообщением, а не приняты за чужие или устаревшие."""
         self._exe_unreadable = f"не удалось прочитать программу: {error}"
-        work = self._read_work()
-        doc = work or {"rev": 0, "settings": {}, "tasks": {}}
+        copies = [(p, d) for p in self._copy_paths() if (d := self._read_copy(p)) is not None]
+        chosen = max(copies, key=lambda c: c[1]["rev"]) if copies else None
+        doc = chosen[1] if chosen else {"rev": 0, "settings": {}, "tasks": {}}
         self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
                      "tasks": _section(doc, "tasks")}
-        self._base_gen = work.get("base_gen") if work else None
-        self._pending_gen = work.get("pending_gen") if work else None
+        self._base_gen = doc.get("base_gen")
+        self._pending_gen = doc.get("pending_gen")
+        self._base_unknown = chosen is None or bool(doc.get("base_unknown"))
         self._embedded_rev = self._doc["rev"]
+        if chosen is not None and chosen[0] != self.work_file.path:
+            self._write_work()
         self.notices.append(f"Не удалось прочитать данные программы ({error}). Изменения этой сессии "
                             "будут сохранены на этом компьютере, но не внутри программы")
 
@@ -418,13 +416,19 @@ class EmbeddedStore:
             if not self._doc[key]:
                 self._doc[key] = data
                 changed = True
-            # если внутри уже есть свои данные, файл — остаток прошлого переноса: просто удалить
-            self._migrated_files.append(path)
+                self._migrated_files.append(path)   # удалить после записи в EXE
+            else:
+                # внутри уже есть свои данные (они сохранены в EXE или копии) — файл лишь
+                # остаток прошлого переноса: убрать сразу
+                _unlink_quietly(path)
         if changed:
             self._doc["rev"] += 1
             self._write_work()
-        elif self._migrated_files and not self.dirty:
-            self._embedded_rev = -1     # данные уже внутри, но папку data нужно убрать при выходе
+        try:
+            if not self._migrated_files:
+                self.legacy_dir.rmdir()     # только если папка опустела
+        except OSError:
+            pass
 
     # ---- чтение / запись
 
@@ -448,7 +452,10 @@ class EmbeddedStore:
         self._write_work()
 
     def _work_payload(self) -> dict:
-        return dict(self._doc, base_gen=self._base_gen, pending_gen=self._pending_gen)
+        payload = dict(self._doc, base_gen=self._base_gen, pending_gen=self._pending_gen)
+        if self._base_unknown:
+            payload["base_unknown"] = True
+        return payload
 
     def _write_work(self) -> None:
         if self._work_blocked:
