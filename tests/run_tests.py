@@ -1105,6 +1105,222 @@ def test_settings_layout():
     main.close()
 
 
+def test_embedded_store():
+    print("## Данные внутри EXE")
+    import datastore as D
+
+    d = Path(tempfile.mkdtemp())
+    exe = d / "ToDoReminder.exe"
+    program = b"MZ" + os.urandom(4000) + b"MEI\x0c\x0b\x0a\x0b\x0e" + os.urandom(100)
+    exe.write_bytes(program)
+    work = d / "work"
+
+    base, doc = D.read_embedded(exe)
+    check("у чистого EXE данных нет", doc is None and base == len(program))
+
+    # перенос старой папки data
+    legacy = d / "data"
+    legacy.mkdir()
+    (legacy / "settings.json").write_text('{"theme": "dark"}', encoding="utf-8")
+    (legacy / "tasks.json").write_text('{"tasks": [{"id": "1", "title": "старое"}]}', encoding="utf-8")
+    st = D.EmbeddedStore(exe, work_dir=work, legacy_dir=legacy)
+    check("старая папка data подхвачена", st.load_settings().get("theme") == "dark"
+          and st.load_tasks()["tasks"][0]["title"] == "старое" and st.dirty)
+    check("рабочая копия создана сразу", st.work_file.path.exists())
+
+    st.save_tasks({"tasks": [{"id": "1", "title": "новое дело"}]})
+    check("выход записывает данные внутрь EXE", st.finalize())
+    base, doc = D.read_embedded(exe)
+    check("программа внутри EXE не изменилась", exe.read_bytes()[:base] == program)
+    check("в EXE — актуальные дела", doc and doc["tasks"]["tasks"][0]["title"] == "новое дело")
+    check("старая папка data удалена после переноса", not legacy.exists())
+    check("рабочая копия удалена после записи в EXE", not st.work_file.path.exists())
+    check("старый EXE отложен в .old", (d / "ToDoReminder.exe.old").exists())
+
+    # «флешка»: копия EXE в другом месте, без рабочей копии
+    usb = d / "usb"
+    usb.mkdir()
+    (usb / "ToDoReminder.exe").write_bytes(exe.read_bytes())
+    st2 = D.EmbeddedStore(usb / "ToDoReminder.exe", work_dir=d / "other-pc")
+    check("копия EXE несёт дела с собой", st2.load_tasks()["tasks"][0]["title"] == "новое дело" and not st2.dirty)
+    check("без изменений EXE не переписывается", st2.finalize() and not (usb / "ToDoReminder.exe.old").exists())
+
+    # сбой: изменения после последней записи в EXE берутся из рабочей копии
+    st3 = D.EmbeddedStore(exe, work_dir=work)
+    st3.save_settings({"theme": "light", "text_size": 40})
+    st4 = D.EmbeddedStore(exe, work_dir=work)   # «перезапуск после падения» без finalize
+    check("после сбоя данные из рабочей копии", st4.load_settings().get("text_size") == 40)
+
+    # повторная запись в EXE не наращивает хвосты
+    st4.save_tasks({"tasks": []})
+    st4.finalize()
+    size1 = exe.stat().st_size
+    st5 = D.EmbeddedStore(exe, work_dir=work)
+    st5.save_tasks({"tasks": [{"id": "2", "title": "x"}]})
+    st5.save_tasks({"tasks": []})
+    st5.finalize()
+    check("хвост один, размер не растёт", abs(exe.stat().st_size - size1) < 64 and D.read_embedded(exe)[0] == len(program))
+
+    # перенос: файл с BOM (Блокнот) читается, нечитаемый файл не удаляется
+    d2 = Path(tempfile.mkdtemp())
+    exe2 = d2 / "ToDoReminder.exe"
+    exe2.write_bytes(program)
+    legacy2 = d2 / "data"
+    legacy2.mkdir()
+    (legacy2 / "settings.json").write_bytes('﻿{"theme": "dark"}'.encode("utf-8"))
+    (legacy2 / "tasks.json").write_text("{битый json", encoding="utf-8")
+    st_b = D.EmbeddedStore(exe2, work_dir=d2 / "w", legacy_dir=legacy2)
+    check("перенос читает файл с BOM", st_b.load_settings().get("theme") == "dark")
+    st_b.finalize()
+    check("нечитаемый файл старых данных не удаляется", (legacy2 / "tasks.json").exists()
+          and not (legacy2 / "settings.json").exists())
+
+    # повреждённый хвост не ломает запуск
+    raw = bytearray(exe.read_bytes())
+    raw[-40] ^= 0xFF
+    bad = d / "bad.exe"
+    bad.write_bytes(bytes(raw))
+    check("повреждённый хвост игнорируется", D.read_embedded(bad)[1] is None)
+
+    # данные переносятся в скачанное обновление
+    new = d / "ToDoReminder.exe.new"
+    new.write_bytes(b"MZ" + os.urandom(3000))
+    st5.save_settings({"theme": "dark", "marker": "обновление"})
+    st5.embed_into(new)
+    check("обновление получает данные", D.read_embedded(new)[1]["settings"].get("marker") == "обновление")
+
+    # нельзя записать (папка только для чтения и т.п.) — данные остаются в рабочей копии
+    orig = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("нет прав"))
+    try:
+        st6 = D.EmbeddedStore(exe, work_dir=work)
+        st6.save_tasks({"tasks": [{"id": "3", "title": "останусь"}]})
+        ok = st6.finalize()
+    finally:
+        D.write_exe_with_data = orig
+    check("без прав на запись EXE не теряет данные", not ok and st6.work_file.path.exists()
+          and D.EmbeddedStore(exe, work_dir=work).load_tasks()["tasks"][0]["title"] == "останусь")
+
+
+def test_finalize_on_exit():
+    print("## Запись данных в EXE при выходе")
+    from app import AppContext
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    class FakeStore:
+        def __init__(self):
+            self.finalized = 0
+            self.saved = []
+
+        def load_settings(self):
+            return {}
+
+        def load_tasks(self):
+            return {}
+
+        def save_settings(self, d):
+            self.saved.append(("s", d))
+
+        def save_tasks(self, d):
+            self.saved.append(("t", d))
+
+        def finalize(self):
+            self.finalized += 1
+            return True
+
+    fake = FakeStore()
+    orig = S._STORE
+    S._STORE = fake
+    try:
+        ctx = AppContext(app)
+        ctx.app = type("A", (), {"quit": lambda self: None, "processEvents": lambda self: None})()
+        ctx.quit()
+        ctx.finalize_storage()   # aboutToQuit после quit() — повторно не пишет
+        check("выход записывает данные внутрь EXE ровно один раз", fake.finalized == 1)
+        check("перед записью в EXE настройки сброшены в хранилище", any(k == "s" for k, _ in fake.saved))
+
+        fake2 = FakeStore()
+        S._STORE = fake2
+        ctx2 = AppContext(app)
+        ctx2.app = ctx.app
+        ctx2.quit(save=False)
+        ctx2.finalize_storage()
+        check("после перезапуска в новую версию старый EXE не переписывается", fake2.finalized == 0)
+    finally:
+        S._STORE = orig
+
+
+def test_single_instance_and_interval():
+    print("## Один экземпляр и интервал проверки обновлений")
+    from single_instance import SingleInstance
+    from update_manager import check_interval_ms
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    lock_dir = tempfile.mkdtemp()
+    name = f"ToDoReminderTest{os.getpid()}"
+    first = SingleInstance(name, lock_dir=lock_dir)
+    check("первый экземпляр запускается", first.acquire())
+    got = []
+    first.activated.connect(lambda: got.append(1))
+    second = SingleInstance(name, lock_dir=lock_dir)
+    check("второй экземпляр не запускается", not second.acquire())
+    # второй экземпляр — отдельным процессом, как в жизни
+    import subprocess
+    import time as _t
+    root = str(Path(__file__).resolve().parent.parent)
+    child_code = (
+        "import sys; sys.path.insert(0, sys.argv[1])\n"
+        "from PySide6.QtCore import QCoreApplication\n"
+        "app = QCoreApplication([])\n"
+        "from single_instance import SingleInstance\n"
+        "s = SingleInstance(sys.argv[2], lock_dir=sys.argv[3])\n"
+        "print('acquired' if s.acquire() else ('sent' if s.activate_existing() else 'fail'))\n"
+    )
+    child = subprocess.Popen([sys.executable, "-c", child_code, root, name, lock_dir],
+                             stdout=subprocess.PIPE, text=True)
+    deadline = _t.time() + 15
+    while _t.time() < deadline and (child.poll() is None or not got):
+        app.processEvents()
+        _t.sleep(0.02)
+    out = (child.communicate(timeout=10)[0] or "").strip()
+    check("второй процесс не запускается и просит первый показать окно", out == "sent" and got == [1],
+          f"child={out} got={got}")
+    first.release()
+    third = SingleInstance(name, lock_dir=lock_dir)
+    check("после выхода первого можно запуститься снова", third.acquire())
+    third.release()
+
+    check("интервал: раз в час", check_interval_ms(1) == 3_600_000)
+    check("интервал: раз в сутки", check_interval_ms(24) == 86_400_000)
+    check("неизвестный интервал → 6 часов", check_interval_ms(5) == check_interval_ms("x") == 6 * 3_600_000)
+
+    from app import AppContext
+    from main_window import MainWindow
+    from update_manager import UpdateManager
+    ctx = AppContext(app)
+    ctx.main_window = MainWindow(ctx)
+    um = UpdateManager(ctx)
+    ctx.settings_manager.s.update_check_hours = 1
+    ctx.settings_manager.save()
+    check("смена интервала в настройках применяется", um._periodic.interval() == 3_600_000)
+    um._on_check_failed("нет сети", True)
+    check("после неудачной тихой проверки — повтор через 10 минут", um._retry.isActive())
+    um.shutdown()
+    check("выход останавливает повтор", not um._retry.isActive())
+
+    from settings_window import SettingsDialog
+    dlg = SettingsDialog(ctx.settings_manager, QGuiApplication.screens(), ctx.main_window)
+    idx = dlg.update_interval_combo.findData(24)
+    dlg.update_interval_combo.setCurrentIndex(idx)
+    check("выбор «раз в сутки» в настройках сохраняется", ctx.settings_manager.s.update_check_hours == 24)
+    check("в списке ровно 1/3/6/12/24 часа",
+          [dlg.update_interval_combo.itemData(i) for i in range(dlg.update_interval_combo.count())] == [1, 3, 6, 12, 24])
+    dlg.auto_update_cb.setChecked(False)
+    check("интервал недоступен при выключенной проверке", not dlg.update_interval_combo.isEnabled())
+    dlg.close()
+
+
 def main():
     test_tasks()
     test_statuses()
@@ -1119,6 +1335,9 @@ def main():
     test_update_polish()
     test_issue_1()
     test_settings_layout()
+    test_embedded_store()
+    test_finalize_on_exit()
+    test_single_instance_and_interval()
 
     print()
     print(f"ПРОЙДЕНО: {PASSED}   ПРОВАЛЕНО: {FAILED}")

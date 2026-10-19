@@ -259,7 +259,10 @@ def cleanup_old() -> bool:
     exe = current_exe()
     ok = True
     for leftover in (old_exe_path(exe), exe.with_name(exe.name + ".failed"),
-                     download_path(exe), download_path(exe).with_name(download_path(exe).name + ".part")):
+                     download_path(exe), download_path(exe).with_name(download_path(exe).name + ".part"),
+                     # недописанные копии при записи данных внутрь EXE (datastore)
+                     exe.with_name(exe.name + ".embed"), exe.with_name(exe.name + ".embed.part"),
+                     exe.with_name(exe.name + ".new.embed"), exe.with_name(exe.name + ".new.embed.part")):
         if leftover.exists():
             try:
                 leftover.unlink()

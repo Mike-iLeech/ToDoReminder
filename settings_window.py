@@ -24,6 +24,10 @@ from PySide6.QtWidgets import (
 
 from reminder_window import MAX_TOTAL_COLUMNS
 from settings import Settings
+from update_manager import CHECK_INTERVAL_CHOICES, DEFAULT_CHECK_HOURS
+
+UPDATE_INTERVAL_NAMES = {1: "раз в час", 3: "раз в 3 часа", 6: "раз в 6 часов",
+                         12: "раз в 12 часов", 24: "раз в сутки"}
 from theme import build_stylesheet
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -251,12 +255,19 @@ class SettingsDialog(QDialog):
         root.addWidget(self.autostart_cb)
 
         update_row = QHBoxLayout()
-        self.auto_update_cb = QCheckBox("Проверять обновления автоматически")
+        self.auto_update_cb = QCheckBox("Проверять обновления")
         self.auto_update_cb.setChecked(self.s.auto_update_check)
         self.auto_update_cb.toggled.connect(self._on_auto_update)
+        self.update_interval_combo = QComboBox()
+        for hours in CHECK_INTERVAL_CHOICES:
+            self.update_interval_combo.addItem(UPDATE_INTERVAL_NAMES[hours], hours)
+        self._select_update_interval(self.s.update_check_hours)
+        self.update_interval_combo.setEnabled(self.s.auto_update_check)
+        self.update_interval_combo.currentIndexChanged.connect(self._on_update_interval)
         check_btn = QPushButton("Проверить сейчас")
         check_btn.clicked.connect(self._on_check_updates)
-        update_row.addWidget(self.auto_update_cb, 1)
+        update_row.addWidget(self.auto_update_cb)
+        update_row.addWidget(self.update_interval_combo, 1)
         update_row.addWidget(check_btn)
         root.addLayout(update_row)
         root.addStretch(1)
@@ -528,7 +539,20 @@ class SettingsDialog(QDialog):
 
     def _on_auto_update(self, checked: bool) -> None:
         self.s.auto_update_check = checked
+        self.update_interval_combo.setEnabled(checked)
         self.sm.save()
+
+    def _on_update_interval(self, index: int) -> None:
+        hours = self.update_interval_combo.itemData(index)
+        if hours:
+            self.s.update_check_hours = int(hours)
+            self.sm.save()
+
+    def _select_update_interval(self, hours) -> None:
+        idx = self.update_interval_combo.findData(int(hours) if str(hours).isdigit() else DEFAULT_CHECK_HOURS)
+        if idx < 0:
+            idx = self.update_interval_combo.findData(DEFAULT_CHECK_HOURS)
+        self.update_interval_combo.setCurrentIndex(idx)
 
     def _on_check_updates(self) -> None:
         if self._update_callback is not None:
@@ -593,6 +617,7 @@ class SettingsDialog(QDialog):
             self.autostart_cb,
             self.auto_remove_cb,
             self.auto_update_cb,
+            self.update_interval_combo,
             self.tray_combo,
         ]
         for w in widgets:
@@ -617,6 +642,8 @@ class SettingsDialog(QDialog):
             self.autostart_cb.setChecked(s.autostart)
             self.auto_remove_cb.setChecked(s.auto_remove_done)
             self.auto_update_cb.setChecked(s.auto_update_check)
+            self._select_update_interval(s.update_check_hours)
+            self.update_interval_combo.setEnabled(s.auto_update_check)
             self.tray_combo.setCurrentIndex(s.tray_action_index)
         finally:
             for w in widgets:

@@ -10,8 +10,7 @@ from PySide6.QtWidgets import QApplication
 from main_window import MainWindow
 from models import Task, TaskStatus, TaskStore
 from reminder_window import ReminderWindow
-from settings import TASKS_PATH, SettingsManager
-from storage import JsonFile
+from settings import SettingsManager, get_store
 from system_tray import SystemTray, make_app_icon
 from theme import TitlebarFilter
 
@@ -144,7 +143,9 @@ class AppContext:
         self.app = app
         self.settings_manager = SettingsManager()
         self.store = TaskStore()
-        self.task_file = JsonFile(TASKS_PATH)
+        # где лежат данные: в собранном EXE — внутри него самого, из исходников — папка data
+        self.data_store = get_store()
+        self._storage_finalized = False
         self._load_tasks()
 
         self.main_window: MainWindow = None
@@ -191,10 +192,10 @@ class AppContext:
                 self.main_window.refresh()
 
     def _load_tasks(self) -> None:
-        self.store.load_dict(self.task_file.load({}))
+        self.store.load_dict(self.data_store.load_tasks())
 
     def save_data(self) -> None:
-        self.task_file.save(self.store.to_dict())
+        self.data_store.save_tasks(self.store.to_dict())
 
     def save_settings(self) -> None:
         self.settings_manager.save()
@@ -205,6 +206,16 @@ class AppContext:
         if self.main_window is not None:
             self.main_window._save_position()
         self.settings_manager.flush()
+
+    def finalize_storage(self) -> None:
+        """Выход: дописать настройки и записать данные внутрь EXE (один раз за процесс).
+        После перезапуска в новую версию (quit(save=False)) не вызывается: данные уже
+        перенесены в новый EXE, а старый трогать нельзя."""
+        if self._storage_finalized or self.settings_manager._closed:
+            return
+        self._storage_finalized = True
+        self.settings_manager.flush()
+        self.data_store.finalize()
 
     def check_updates(self) -> None:
         if self.updates is not None:
@@ -275,7 +286,7 @@ class AppContext:
         if self.updates is not None:
             self.updates.shutdown()
         if save:
-            self.settings_manager.flush()
+            self.finalize_storage()
         else:
             self.settings_manager.discard_pending()
         if self.tray is not None:
@@ -296,6 +307,16 @@ def run(argv=None) -> None:
     app._titlebar_filter = TitlebarFilter()
     app.installEventFilter(app._titlebar_filter)
 
+    # защита от повторного запуска: второй экземпляр показывает окно первого и выходит.
+    # После обновления новая версия стартует, пока старая ещё закрывается, — ждёт её.
+    from single_instance import SingleInstance
+
+    instance = SingleInstance()
+    if not instance.acquire(wait_ms=20_000 if "--updated" in argv else 0):
+        instance.activate_existing()
+        sys.exit(0)
+    app._single_instance = instance
+
     ctx = AppContext(app)
 
     ctx._startup_cleanup()
@@ -315,7 +336,9 @@ def run(argv=None) -> None:
     ctx.settings_manager.changed.connect(ctx.main_window.sync_theme)
 
     # выход через завершение сеанса Windows и т.п. — не потерять отложенную запись настроек
-    app.aboutToQuit.connect(ctx.settings_manager.flush)
+    # и записать данные внутрь EXE
+    app.aboutToQuit.connect(ctx.finalize_storage)
+    instance.activated.connect(ctx.open_main_window)
 
     from update_manager import UpdateManager
 

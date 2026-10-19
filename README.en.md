@@ -27,7 +27,8 @@ fullscreen timer reminders, dark/light theme and a system tray.
 - **System tray** — closing minimizes to tray, LMB restores the window, RMB opens the menu (including "Exit").
 - **Import / export** as **JSON / TXT / CSV**.
 - **Clear list** only after confirmation.
-- **Portability** — all data lives in the `data` folder next to the program.
+- **Portability** — settings and tasks are stored inside the EXE itself: no files next to it; copy the EXE to a USB stick and the data goes with it.
+- **Single instance** — launching again just shows the running window.
 - **Auto-update** — new versions are downloaded straight from GitHub Releases.
 
 ## Requirements
@@ -57,14 +58,14 @@ The script generates the icon and version metadata (from `version.py`) and build
 The app updates itself from **GitHub Releases** — no separate server is needed. It queries
 `api.github.com/repos/Mike-iLeech/ToDoReminder/releases/latest`, compares the tag with `APP_VERSION`
 and, if newer, offers to download the `ToDoReminder.exe` asset (SHA-256 verified), swaps its own EXE
-and restarts. The `data` folder is left untouched.
+and restarts. Settings and tasks are carried over into the new EXE. Check frequency is configurable (1/3/6/12/24 hours).
 
 To release: bump `APP_VERSION` in `version.py`, add a `CHANGELOG.md` section, merge to `main` and tag
 `vX.Y.Z.W`. The GitHub Actions workflow runs the tests, builds the EXE and publishes the release.
 Versions before 2.7.0.0 have no auto-update — move to 2.7.0.0 manually once.
 
 Result: `dist\ToDoReminder.exe`. It needs nothing but itself —
-data is created next to it (the `data` folder).
+settings and tasks live inside it (when run from source — in the `data` folder).
 
 ## Run tests
 

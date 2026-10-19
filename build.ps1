@@ -29,7 +29,6 @@ Invoke-Step "PyInstaller" {
         --exclude-module tkinter `
         --exclude-module unittest `
         --exclude-module pydoc `
-        --exclude-module PySide6.QtNetwork `
         --exclude-module PySide6.QtQml `
         --exclude-module PySide6.QtQuick `
         main.py

@@ -18,7 +18,8 @@ class JsonFile:
         if default is None:
             default = {}
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            # utf-8-sig: файл, сохранённый Блокнотом, начинается с BOM — читаем и такой
+            with open(self.path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             if isinstance(data, (dict, list)):
                 return data
