@@ -1506,6 +1506,49 @@ def test_embedded_store():
     check("повреждён хвост, нечего сохранять, только чтение: выход без ошибки и без пустых файлов",
           res == [(True, 0)] * 3, str(res))
 
+    # ---- ревью 7
+    # G1: свежий запасной файл этого ПК не проигрывает устаревшей рабочей копии, когда EXE не прочитался
+    dG, eG = fresh("g1")
+    sG = D.EmbeddedStore(eG, work_dir=dG / "w")
+    sG.save_tasks({"tasks": [{"id": "1", "title": "base"}]})
+    sG.finalize()
+    sG2 = D.EmbeddedStore(eG, work_dir=dG / "w")
+    sG2.save_tasks({"tasks": [{"id": "1", "title": "s1"}]})                  # рабочая копия rev+1
+    sG2._work_blocked = True                                                  # дальше рабочая копия не пишется
+    for i in range(2, 9):
+        sG2.save_tasks({"tasks": [{"id": "1", "title": f"s{i}"}]})
+    orig_w5 = D.write_exe_with_data
+    D.write_exe_with_data = lambda *a, **k: (_ for _ in ()).throw(PermissionError("нет"))
+    try:
+        sG2.finalize()                                                        # → session-файл с «s8»
+    finally:
+        D.write_exe_with_data = orig_w5
+    orig_ins4 = D.inspect_embedded
+    D.inspect_embedded = lambda p: (_ for _ in ()).throw(OSError("занят"))
+    try:
+        sG3 = D.EmbeddedStore(eG, work_dir=dG / "w")
+        seen = sG3.load_tasks()["tasks"][0]["title"]
+        sG3.save_tasks({"tasks": [{"id": "1", "title": "U-EDIT"}]})
+        sG3.finalize()
+    finally:
+        D.inspect_embedded = orig_ins4
+    sG4 = D.EmbeddedStore(eG, work_dir=dG / "w")
+    check("EXE не прочитался: взят самый свежий свой запасной файл", seen == "s8", seen)
+    check("правки сессии с непрочитанным EXE не теряются", sG4.load_tasks()["tasks"][0]["title"] == "U-EDIT")
+
+    # G2: копия без метки происхождения (старая сборка) — не «чужая»
+    dH, eH = fresh("g2")
+    sH = D.EmbeddedStore(eH, work_dir=dH / "w")
+    sH.save_tasks({"tasks": [{"id": "1", "title": "base"}]})
+    sH.finalize()
+    gH = D.read_embedded(eH)[1]
+    sH2 = D.EmbeddedStore(eH, work_dir=dH / "w")
+    sH2.save_tasks({"tasks": [{"id": "1", "title": "mine"}]})               # рабочая копия с origin
+    put_session(dH, eH, "legacy9", gH["rev"] + 9, gH["gen"])                  # без поля origin
+    sH3 = D.EmbeddedStore(eH, work_dir=dH / "w")
+    check("копия без метки происхождения не даёт ложного конфликта",
+          not any("другой копии" in n for n in sH3.notices) and not list((dH / "w").glob("*conflict*")))
+
     # импорт понимает формат рабочей/запасной копии
     from import_export import load_tasks as _load_tasks_file
     copy_file = dfb / "copy.json"

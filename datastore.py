@@ -370,7 +370,9 @@ class EmbeddedStore:
                 continue
             path, data = c
             reference = chosen[1].get("origin") if chosen else self._origin
-            superseded = c in own and data.get("origin") == reference and (
+            # копии без метки (созданы до её появления) считаются своими — иначе ложный «конфликт»
+            same_origin = reference is None or data.get("origin") in (reference, None)
+            superseded = c in own and same_origin and (
                 chosen is None or data["rev"] <= chosen[1]["rev"])
             if superseded:
                 if damaged:
@@ -408,10 +410,14 @@ class EmbeddedStore:
         понятным сообщением, а не приняты за чужие или устаревшие."""
         self._exe_unreadable = f"не удалось прочитать программу: {error}"
         copies = [(p, d) for p in self._copy_paths() if (d := self._read_copy(p)) is not None]
-        work = next((c for c in copies if c[0] == self.work_file.path), None)
-        # рабочую копию этого ПК никогда не подменяем чужой (её бы перезаписали при сохранении);
-        # запасной файл берём, только если рабочей копии нет
-        chosen = work or (max(copies, key=lambda c: c[1]["rev"]) if copies else None)
+        # самая свежая копия ЭТОГО ПК (рабочая или его же запасной файл): чужой копией рабочую
+        # не подменяем, а устаревшую рабочую не берём поверх более свежего своего запасного файла
+        mine = [c for c in copies if c[0] == self.work_file.path or c[1].get("origin") in (self._origin, None)]
+        chosen = (max(mine, key=lambda c: c[1]["rev"]) if mine
+                  else (max(copies, key=lambda c: c[1]["rev"]) if copies else None))
+        for c in mine:
+            if c is not chosen and c[0] != self.work_file.path:
+                self._obsolete_files.append(c[0])   # свои и старше выбранной — убрать после записи
         doc = chosen[1] if chosen else {"rev": 0, "settings": {}, "tasks": {}}
         self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
                      "tasks": _section(doc, "tasks")}
