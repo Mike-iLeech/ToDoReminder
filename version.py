@@ -1,4 +1,4 @@
 APP_NAME = "ToDo Reminder"
 APP_AUTHOR = "iLeech"
-APP_VERSION = "2.7.2.0"
+APP_VERSION = "2.8.0.0"
 APP_RELEASE_DATE = "2026-10-19"
