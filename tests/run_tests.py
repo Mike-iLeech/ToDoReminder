@@ -1175,6 +1175,104 @@ def test_embedded_store():
     check("нечитаемый файл старых данных не удаляется", (legacy2 / "tasks.json").exists()
           and not (legacy2 / "settings.json").exists())
 
+    # ПК A / ПК B: старая рабочая копия с ПК A не должна перебить правки, сделанные на ПК B
+    d3 = Path(tempfile.mkdtemp())
+    usb_exe = d3 / "ToDoReminder.exe"
+    usb_exe.write_bytes(program)
+    pc_a, pc_b = d3 / "pcA", d3 / "pcB"
+    a1 = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    a1.save_tasks({"tasks": [{"id": "1", "title": "v1"}]})
+    a1.finalize()
+    a2 = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    for i in range(4):
+        a2.save_tasks({"tasks": [{"id": "1", "title": f"сбой A {i}"}]})
+    # ПК A упал без выхода — рабочая копия с бОльшей ревизией осталась на A
+    b = D.EmbeddedStore(usb_exe, work_dir=pc_b)
+    b.save_tasks({"tasks": [{"id": "1", "title": "ВАЖНОЕ с ПК B"}]})
+    b.finalize()
+    back = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    check("правки с другого ПК не перебиваются старой рабочей копией",
+          back.load_tasks()["tasks"][0]["title"] == "ВАЖНОЕ с ПК B")
+    conflicts = list(pc_a.glob("work-*-conflict-*.json"))
+    check("устаревшая рабочая копия отложена, а не удалена, и есть сообщение",
+          len(conflicts) == 1 and "сбой A 3" in conflicts[0].read_text(encoding="utf-8") and back.notices)
+
+    # обычное восстановление после сбоя на том же ПК — с сообщением
+    a3 = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    a3.save_tasks({"tasks": [{"id": "1", "title": "после B, сбой"}]})
+    a4 = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    check("восстановление после сбоя с сообщением",
+          a4.load_tasks()["tasks"][0]["title"] == "после B, сбой" and any("Восстановлены" in n for n in a4.notices))
+
+    # обновление: данные в скачанном EXE, рабочая копия продолжает новое поколение (без ложного конфликта)
+    upd = d3 / "ToDoReminder.exe.new"
+    upd.write_bytes(b"MZ" + os.urandom(2000))
+    conflicts_before = len(list(pc_a.glob("work-*-conflict-*.json")))
+    a4.embed_into(upd)
+    check("после обновления данные в новом EXE", D.read_embedded(upd)[1]["tasks"]["tasks"][0]["title"] == "после B, сбой")
+    os.replace(upd, usb_exe)        # как install_and_restart: новая версия встаёт на место старой
+    a5 = D.EmbeddedStore(usb_exe, work_dir=pc_a)
+    check("после обновления нет ложного конфликта и сообщения о восстановлении",
+          len(list(pc_a.glob("work-*-conflict-*.json"))) == conflicts_before and not a5.notices
+          and a5.load_tasks()["tasks"][0]["title"] == "после B, сбой")
+
+    # повреждённое поле длины при целой метке не обрезает программу
+    d4 = Path(tempfile.mkdtemp())
+    exe4 = d4 / "ToDoReminder.exe"
+    exe4.write_bytes(program + D.pack({"rev": 1, "gen": "x", "settings": {}, "tasks": {}}))
+    raw4 = bytearray(exe4.read_bytes())
+    length, crc, magic = D.TRAILER.unpack(bytes(raw4[-D.TRAILER.size:]))
+    raw4[-D.TRAILER.size:] = D.TRAILER.pack(length + 3000, crc, magic)
+    exe4.write_bytes(bytes(raw4))
+    st7 = D.EmbeddedStore(exe4, work_dir=d4 / "w")
+    st7.save_tasks({"tasks": [{"id": "z", "title": "z"}]})
+    st7.finalize()
+    check("порча поля длины не обрезает программу", exe4.read_bytes()[:len(program)] == program
+          and D.read_embedded(exe4)[1]["tasks"]["tasks"][0]["title"] == "z")
+
+    # испорченная рабочая копия не ломает запуск
+    d5 = Path(tempfile.mkdtemp())
+    exe5 = d5 / "ToDoReminder.exe"
+    exe5.write_bytes(program)
+    st8 = D.EmbeddedStore(exe5, work_dir=d5 / "w")
+    st8.save_tasks({"tasks": []})
+    st8.work_file.path.write_text('{"rev": null, "tasks": 5}', encoding="utf-8")
+    try:
+        st9 = D.EmbeddedStore(exe5, work_dir=d5 / "w")
+        check("испорченная рабочая копия не ломает запуск", st9.load_tasks() == {} and st9.notices)
+    except Exception as e:  # noqa: BLE001
+        check("испорченная рабочая копия не ломает запуск", False, repr(e))
+
+    # частичный перенос повторяется, когда старый файл исправили
+    d6 = Path(tempfile.mkdtemp())
+    exe6 = d6 / "ToDoReminder.exe"
+    exe6.write_bytes(program)
+    leg6 = d6 / "data"
+    leg6.mkdir()
+    (leg6 / "settings.json").write_text('{"theme": "dark"}', encoding="utf-8")
+    (leg6 / "tasks.json").write_text("{битый", encoding="utf-8")
+    s6 = D.EmbeddedStore(exe6, work_dir=d6 / "w", legacy_dir=leg6)
+    s6.finalize()
+    (leg6 / "tasks.json").write_text('{"tasks": [{"id": "f", "title": "починенный"}]}', encoding="utf-8")
+    s6b = D.EmbeddedStore(exe6, work_dir=d6 / "w", legacy_dir=leg6)
+    check("исправленный старый файл переносится при следующем запуске",
+          s6b.load_tasks()["tasks"][0]["title"] == "починенный" and s6b.load_settings().get("theme") == "dark")
+    s6b.finalize()
+    check("после переноса папка data удалена", not leg6.exists())
+
+    # удаление .old: путь со спецсимволами cmd и %ПЕРЕМЕННЫМИ%
+    import time as _t
+    weird = Path(tempfile.mkdtemp()) / "a %PATH% b & c ^ d ! (e)"
+    weird.mkdir()
+    victim = weird / "ToDoReminder.exe.old"
+    victim.write_bytes(b"x")
+    D.schedule_delete(victim)
+    for _ in range(30):
+        if not victim.exists():
+            break
+        _t.sleep(0.2)
+    check("отложенное удаление .old с %, &, ^, ! в пути", not victim.exists())
+
     # повреждённый хвост не ломает запуск
     raw = bytearray(exe.read_bytes())
     raw[-40] ^= 0xFF
@@ -1286,6 +1384,8 @@ def test_single_instance_and_interval():
     out = (child.communicate(timeout=10)[0] or "").strip()
     check("второй процесс не запускается и просит первый показать окно", out == "sent" and got == [1],
           f"child={out} got={got}")
+    broken = SingleInstance(name, lock_dir=str(Path(lock_dir) / "нет-такой-папки"))
+    check("ошибка файла блокировки не мешает запуску", broken.acquire() and broken.lock_unavailable)
     first.release()
     third = SingleInstance(name, lock_dir=lock_dir)
     check("после выхода первого можно запуститься снова", third.acquire())

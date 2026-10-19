@@ -207,15 +207,15 @@ class AppContext:
             self.main_window._save_position()
         self.settings_manager.flush()
 
-    def finalize_storage(self) -> None:
+    def finalize_storage(self) -> bool:
         """Выход: дописать настройки и записать данные внутрь EXE (один раз за процесс).
         После перезапуска в новую версию (quit(save=False)) не вызывается: данные уже
         перенесены в новый EXE, а старый трогать нельзя."""
         if self._storage_finalized or self.settings_manager._closed:
-            return
+            return True
         self._storage_finalized = True
         self.settings_manager.flush()
-        self.data_store.finalize()
+        return self.data_store.finalize()
 
     def check_updates(self) -> None:
         if self.updates is not None:
@@ -286,7 +286,17 @@ class AppContext:
         if self.updates is not None:
             self.updates.shutdown()
         if save:
-            self.finalize_storage()
+            if not self.finalize_storage():
+                # не молчать: иначе пользователь унесёт EXE со старыми данными
+                from PySide6.QtWidgets import QMessageBox
+
+                error = getattr(self.data_store, "last_error", None) or "неизвестная ошибка"
+                QMessageBox.warning(
+                    None, "ToDo Reminder",
+                    "Не удалось записать дела и настройки внутрь программы:\n"
+                    f"{error}\n\nОни сохранены на этом компьютере и будут записаны при следующем "
+                    "выходе. Если переносите программу на другой ПК — сначала устраните причину "
+                    "(например, папка только для чтения или нет места на диске).")
         else:
             self.settings_manager.discard_pending()
         if self.tray is not None:
@@ -350,10 +360,12 @@ def run(argv=None) -> None:
         main_window.hide()
     else:
         main_window.show()
+    notices = list(getattr(ctx.data_store, "notices", []))
     if "--updated" in sys.argv:
         from version import APP_VERSION
 
-        tray.showMessage("ToDo Reminder", f"Программа обновлена до версии {APP_VERSION}",
-                         SystemTray.Information, 6000)
+        notices.insert(0, f"Программа обновлена до версии {APP_VERSION}")
+    if notices:
+        tray.showMessage("ToDo Reminder", "\n".join(notices), SystemTray.Information, 10000)
 
     sys.exit(app.exec())

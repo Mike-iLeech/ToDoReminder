@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import time
+import uuid
 import zlib
 from pathlib import Path
 
@@ -59,11 +60,14 @@ def read_embedded(path) -> tuple[int, dict | None]:
         f.seek(base)
         payload = f.read(length)
     if zlib.crc32(payload) != crc:
-        return base, None       # хвост повреждён — данных нет, но и в копию его не тащим
+        # хвост повреждён, и поле длины тоже может быть испорчено — тогда «программа без
+        # хвоста» оказалась бы обрезанной. Безопаснее считать программой весь файл: новый
+        # хвост ляжет после старого, а загрузчик PyInstaller найдёт свой архив как и раньше
+        return size, None
     try:
         doc = json.loads(zlib.decompress(payload).decode("utf-8"))
     except (zlib.error, ValueError):
-        return base, None
+        return size, None
     return base, doc if isinstance(doc, dict) else None
 
 
@@ -113,20 +117,21 @@ def schedule_delete(path) -> None:
     """Удалить файл сразу после выхода программы (пока она работает, .old занят загрузчиком)."""
     if sys.platform != "win32":
         return
-    p = str(path)
+    # Путь передаётся через переменную окружения: её значение cmd не разбирает повторно,
+    # поэтому %VAR%, %i, &, ^, ! и т.п. в пути не подставляются и ничего не ломают.
+    env = dict(os.environ)
+    env["TODOREMINDER_OLD"] = str(path)
     # ping — пауза ~1 с между попытками. Условие обязательно в скобках: в cmd всё, что стоит
     # после `if` на той же строке (включая `& ping`), входит в тело if, и без скобок пауза
     # пропускалась — все попытки сгорали за миллисекунды, пока файл ещё занят загрузчиком
     ping = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PING.EXE")
     erase = "del " + "/f /q"
-    inner = (f'for /l %i in (1,1,30) do @({erase} "{p}" >nul 2>&1 & '
-             f'(if not exist "{p}" exit /b) & "{ping}" -n 2 127.0.0.1 >nul)')
+    inner = (f'for /l %i in (1,1,30) do @({erase} "%TODOREMINDER_OLD%" >nul 2>&1 & '
+             f'(if not exist "%TODOREMINDER_OLD%" exit /b) & "{ping}" -n 2 127.0.0.1 >nul)')
     # строкой, а не списком: при списке subprocess экранирует кавычки как \", а cmd так не
     # понимает; /s снимает только внешние кавычки и оставляет команду как есть
     try:
-        # явные стандартные потоки: у отсоединённого процесса их нет, и без них ping
-        # завершался мгновенно — все попытки удаления проскакивали, пока файл ещё занят
-        subprocess.Popen(f'cmd /d /s /c "{inner}"', close_fds=True,
+        subprocess.Popen(f'cmd /d /s /c "{inner}"', close_fds=True, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
     except OSError:
@@ -140,51 +145,108 @@ def default_work_dir() -> Path:
 
 # ------------------------------------------------------------------ хранилище
 
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _section(doc: dict, key: str) -> dict:
+    value = doc.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 class EmbeddedStore:
-    """Настройки и дела внутри EXE + рабочая копия на время работы программы."""
+    """Настройки и дела внутри EXE + рабочая копия на время работы программы.
+
+    «Поколение» (gen) — случайная метка, которая ставится при каждой записи данных в EXE.
+    Рабочая копия помнит, от какого поколения она пошла (base_gen). Её изменения берутся,
+    только если EXE содержит то же самое поколение: иначе EXE успели изменить в другом
+    месте (например, на другом ПК с флешки), и старая рабочая копия перебила бы более
+    новые данные. Такая копия не применяется и не удаляется — её откладывают в файл
+    «…-conflict-<время>.json» и сообщают пользователю.
+    """
 
     def __init__(self, exe, work_dir=None, legacy_dir=None) -> None:
         self.exe = Path(exe)
         self.work_dir = Path(work_dir) if work_dir else default_work_dir()
         key = hashlib.sha1(str(self.exe).lower().encode("utf-8")).hexdigest()[:16]
+        self._key = key
         self.work_file = JsonFile(self.work_dir / f"work-{key}.json")
         self.legacy_dir = Path(legacy_dir) if legacy_dir else self.exe.parent / "data"
         self._migrated_files: list[Path] = []
         self.last_error: str | None = None
-        self._doc, self._embedded_rev = self._load()
+        self.notices: list[str] = []          # что показать пользователю после запуска
+        self._doc: dict = {"rev": 0, "settings": {}, "tasks": {}}
+        self._base_gen: str | None = None     # поколение данных, лежащих сейчас в EXE
+        self._embedded_rev: int = 0
+        self._load()
 
     # ---- загрузка
 
-    def _load(self) -> tuple[dict, int]:
+    def _read_work(self) -> dict | None:
+        if not self.work_file.exists():
+            return None
+        try:
+            data = json.loads(self.work_file.path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("rev"), int):
+            self._set_aside("damaged", "Рабочая копия данных повреждена и отложена")
+            return None
+        return data
+
+    def _set_aside(self, tag: str, message: str) -> None:
+        """Отложить рабочую копию в отдельный файл (не удалять — там могут быть данные)."""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}.json"
+        try:
+            os.replace(self.work_file.path, target)
+            self.notices.append(f"{message}: {target}")
+        except OSError as e:
+            self.notices.append(f"{message}, но отложить её не удалось: {e}")
+
+    def _load(self) -> None:
         try:
             _, embedded = read_embedded(self.exe)
         except OSError:
             embedded = None
-        work = self.work_file.load(None) if self.work_file.exists() else None
-        work = work if isinstance(work, dict) else None
-        embedded_rev = int(embedded.get("rev", 0)) if embedded else -1
-        candidates = [d for d in (embedded, work) if d]
-        if candidates:
-            # у рабочей копии ревизия больше, только если прошлый выход не успел записать EXE
-            doc = max(candidates, key=lambda d: int(d.get("rev", 0)))
-            return self._normalize(doc), embedded_rev
-        doc = self._migrate_legacy()
-        # чистый первый запуск: записывать в EXE нечего, пока ничего не изменилось
-        return doc, (embedded_rev if self._migrated_files else doc["rev"])
+        e_gen = embedded.get("gen") if embedded else None
+        e_rev = _as_int(embedded.get("rev")) if embedded else 0
+        work = self._read_work()
 
-    @staticmethod
-    def _normalize(doc: dict) -> dict:
-        return {
-            "rev": int(doc.get("rev", 0)),
-            "settings": doc.get("settings") if isinstance(doc.get("settings"), dict) else {},
-            "tasks": doc.get("tasks") if isinstance(doc.get("tasks"), dict) else {},
-        }
+        doc = None
+        if work is not None:
+            if work.get("base_gen") == e_gen:
+                # продолжение тех же данных: рабочая копия новее, только если прошлый
+                # выход не успел записать их в EXE (сбой, выключение, нет прав)
+                if embedded is None or work["rev"] > e_rev:
+                    doc = work
+                    self.notices.append("Восстановлены изменения, которые не успели записаться "
+                                        "в программу при прошлом выходе")
+            else:
+                self._set_aside("conflict", "Найдены несохранённые изменения от другой копии данных — "
+                                            "программа уже содержит более новые. Старые изменения "
+                                            "отложены в файл")
+        if doc is None and embedded is not None:
+            doc = embedded
+        if doc is None:
+            doc = {"rev": 0, "settings": {}, "tasks": {}}
 
-    def _migrate_legacy(self) -> dict:
-        """Первый запуск после перехода: забрать данные из старой папки data рядом с EXE."""
-        doc = {"rev": 0, "settings": {}, "tasks": {}}
-        for key, name in (("settings", "settings.json"), ("tasks", "tasks.json")):
-            path = self.legacy_dir / name
+        self._doc = {"rev": _as_int(doc.get("rev")), "settings": _section(doc, "settings"),
+                     "tasks": _section(doc, "tasks")}
+        self._base_gen = e_gen
+        self._embedded_rev = e_rev if embedded is not None else 0
+        self._merge_legacy()
+
+    def _merge_legacy(self) -> None:
+        """Папка data от старых версий: забрать то, чего ещё нет внутри, и удалить её после
+        записи в EXE. Повторяется при каждом запуске, пока файлы лежат (например, если
+        файл не читался, а его потом исправили)."""
+        changed = False
+        for key, path in (("settings", self.legacy_dir / "settings.json"),
+                          ("tasks", self.legacy_dir / "tasks.json")):
             if not path.exists():
                 continue
             try:
@@ -192,19 +254,25 @@ class EmbeddedStore:
             except (OSError, ValueError):
                 # не прочитался — не переносим и, главное, не удаляем: пусть лежит как был
                 self.last_error = f"не удалось прочитать {path}"
+                self.notices.append(f"Не удалось прочитать старый файл данных {path} — он оставлен как есть")
                 continue
-            if isinstance(data, dict):
-                doc[key] = data
-                self._migrated_files.append(path)
-        if self._migrated_files:
-            doc["rev"] = 1          # данные есть, но в EXE их ещё нет — записать при выходе
-            self._write_work(doc)
-        return doc
+            if not isinstance(data, dict):
+                continue
+            if not self._doc[key]:
+                self._doc[key] = data
+                changed = True
+            # если внутри уже есть свои данные, файл — остаток прошлого переноса: просто удалить
+            self._migrated_files.append(path)
+        if changed:
+            self._doc["rev"] += 1
+            self._write_work()
+        elif self._migrated_files and not self.dirty:
+            self._embedded_rev = -1     # данные уже внутри, но папку data нужно убрать при выходе
 
     # ---- чтение / запись
 
     def load_settings(self) -> dict:
-        return dict(self._doc["settings"])
+        return json.loads(json.dumps(self._doc["settings"]))
 
     def load_tasks(self) -> dict:
         return json.loads(json.dumps(self._doc["tasks"]))
@@ -220,17 +288,20 @@ class EmbeddedStore:
             return
         self._doc[key] = json.loads(json.dumps(data))
         self._doc["rev"] += 1
-        self._write_work(self._doc)
+        self._write_work()
 
-    def _write_work(self, doc: dict) -> None:
+    def _write_work(self) -> None:
         try:
-            self.work_file.save(doc)
+            self.work_file.save(dict(self._doc, base_gen=self._base_gen))
         except OSError as e:
             self.last_error = f"рабочая копия: {e}"
 
     @property
     def dirty(self) -> bool:
         return self._doc["rev"] != self._embedded_rev
+
+    def _embedded_doc(self, gen: str) -> dict:
+        return dict(self._doc, gen=gen)
 
     # ---- запись внутрь EXE
 
@@ -240,21 +311,28 @@ class EmbeddedStore:
         if not self.dirty:
             self._drop_work()
             return True
+        gen = uuid.uuid4().hex
         embed = self.exe.with_name(self.exe.name + EMBED_SUFFIX)
         old = self.exe.with_name(self.exe.name + OLD_SUFFIX)
         try:
-            write_exe_with_data(self.exe, embed, self._doc)
+            write_exe_with_data(self.exe, embed, self._embedded_doc(gen))
             _unlink_quietly(old)
             _replace_with_retry(self.exe, old)
-            try:
-                _replace_with_retry(embed, self.exe)
-            except OSError:
-                os.replace(old, self.exe)       # вернуть рабочий EXE на место
-                raise
         except OSError as e:
             _unlink_quietly(embed)
-            self.last_error = f"запись в EXE: {e}"
+            self.last_error = f"запись в программу: {e}"
             return False
+        try:
+            _replace_with_retry(embed, self.exe)
+        except OSError as e:
+            try:
+                os.replace(old, self.exe)       # вернуть рабочий EXE на место
+                _unlink_quietly(embed)
+            except OSError:
+                pass        # .embed не удаляем: если не вернулся и прежний EXE, в нём наши данные
+            self.last_error = f"запись в программу: {e}"
+            return False
+        self._base_gen = gen
         self._embedded_rev = self._doc["rev"]
         self._drop_work()
         self._drop_legacy()
@@ -265,9 +343,14 @@ class EmbeddedStore:
         """Перенести текущие данные в другой EXE (скачанное обновление) — чтобы после
         подмены программы дела и настройки не потерялись."""
         path = Path(path)
+        gen = uuid.uuid4().hex
         tmp = path.with_name(path.name + EMBED_SUFFIX)
-        write_exe_with_data(path, tmp, self._doc)
+        write_exe_with_data(path, tmp, self._embedded_doc(gen))
         os.replace(tmp, path)
+        # новая версия будет содержать поколение gen — рабочая копия продолжает именно его
+        self._base_gen = gen
+        self._embedded_rev = self._doc["rev"]
+        self._write_work()
 
     def _drop_work(self) -> None:
         _unlink_quietly(self.work_file.path)

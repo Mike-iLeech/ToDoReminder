@@ -34,10 +34,16 @@ class SingleInstance(QObject):
         self._lock = QLockFile(str(directory / f"{self._key}.lock"))
         self._lock.setStaleLockTime(0)  # только проверка «жив ли владелец», без таймаута по времени
         self._server = None
+        self.lock_unavailable = False
 
     def acquire(self, wait_ms: int = 0) -> bool:
         """True — мы единственный экземпляр. wait_ms — сколько ждать, пока прежний завершится."""
         if not self._lock.tryLock(wait_ms):
+            if self._lock.error() != QLockFile.LockFailedError:
+                # блокировку не создать вовсе (нет временной папки, нет прав) — это не «уже
+                # запущено»: лучше работать без защиты, чем молча не запуститься
+                self.lock_unavailable = True
+                return True
             return False
         QLocalServer.removeServer(self._key)  # канал от упавшего процесса
         self._server = QLocalServer(self)
