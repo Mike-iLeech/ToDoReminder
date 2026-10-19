@@ -129,6 +129,12 @@ def build_stylesheet(theme: str) -> str:
         color: {c['text']};
     }}
     QSpinBox[spinPill="true"]:focus {{ border: 2px solid {c['accent']}; }}
+    QSpinBox[hiddenButtons="true"]::up-button, QSpinBox[hiddenButtons="true"]::down-button {{
+        width: 0; border: none;
+    }}
+    QSpinBox[hiddenButtons="true"]::up-arrow, QSpinBox[hiddenButtons="true"]::down-arrow {{
+        image: none; width: 0;
+    }}
     QPushButton[colorSwatch="true"] {{
         border: 1px solid {c['input_border']};
         border-radius: 8px;
