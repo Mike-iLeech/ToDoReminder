@@ -1216,6 +1216,49 @@ def test_embedded_store():
           len(list(pc_a.glob("work-*-conflict-*.json"))) == conflicts_before and not a5.notices
           and a5.load_tasks()["tasks"][0]["title"] == "после B, сбой")
 
+    # обновление скачано и данные перенесены, но установка не удалась → выход без новых правок
+    d7 = Path(tempfile.mkdtemp())
+    exe7 = d7 / "ToDoReminder.exe"
+    exe7.write_bytes(program)
+    s70 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    s70.save_tasks({"tasks": [{"id": "1", "title": "u0"}]})
+    s70.finalize()
+    s71 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    s71.save_tasks({"tasks": [{"id": "1", "title": "правки сессии"}]})
+    new7 = d7 / "ToDoReminder.exe.new"
+    new7.write_bytes(b"MZ" + os.urandom(1500))
+    s71.embed_into(new7)          # install_and_restart затем падает — программа работает дальше
+    check("после неудачной установки правки ещё не записаны в EXE (dirty)", s71.dirty)
+    s71.finalize()
+    s72 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    check("неудачная установка обновления не теряет правки сессии",
+          s72.load_tasks()["tasks"][0]["title"] == "правки сессии" and not s72.notices)
+
+    # тот же сценарий, но вместо выхода — сбой: правки восстанавливаются, а не уходят в «конфликт»
+    s73 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    s73.save_tasks({"tasks": [{"id": "1", "title": "ещё правки"}]})
+    new7.write_bytes(b"MZ" + os.urandom(1500))
+    s73.embed_into(new7)
+    s74 = D.EmbeddedStore(exe7, work_dir=d7 / "w")   # сбой, старая версия запущена снова
+    check("неудачная установка + сбой: правки восстановлены без ложного конфликта",
+          s74.load_tasks()["tasks"][0]["title"] == "ещё правки"
+          and not list((d7 / "w").glob("*conflict*")) and any("Восстановлены" in n for n in s74.notices))
+
+    # рабочая копия с тем же содержимым, что в EXE (её не дал удалить антивирус) — тихо убирается
+    s74.finalize()
+    s75 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    s75.work_file.save(dict(D.read_embedded(exe7)[1], base_gen="чужое", pending_gen=None))
+    s76 = D.EmbeddedStore(exe7, work_dir=d7 / "w")
+    check("рабочая копия, совпадающая с EXE, не даёт ложного конфликта",
+          not s76.notices and not list((d7 / "w").glob("*conflict*")) and not s76.work_file.path.exists())
+
+    # повреждённые встроенные данные — с сообщением, а не тихий пустой список
+    raw7 = bytearray(exe7.read_bytes())
+    raw7[-D.TRAILER.size - 5] ^= 0xFF
+    exe7.write_bytes(bytes(raw7))
+    s77 = D.EmbeddedStore(exe7, work_dir=d7 / "w2")
+    check("повреждённые данные внутри программы — с сообщением", any("повреждены" in n for n in s77.notices))
+
     # повреждённое поле длины при целой метке не обрезает программу
     d4 = Path(tempfile.mkdtemp())
     exe4 = d4 / "ToDoReminder.exe"

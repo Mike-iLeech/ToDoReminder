@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -45,17 +46,19 @@ def pack(doc: dict) -> bytes:
     return payload + TRAILER.pack(len(payload), zlib.crc32(payload), MAGIC)
 
 
-def read_embedded(path) -> tuple[int, dict | None]:
-    """(длина EXE без хвоста, данные из хвоста или None)."""
+def inspect_embedded(path) -> tuple[int, dict | None, bool]:
+    """(длина EXE без хвоста, данные из хвоста или None, хвост есть, но повреждён)."""
     path = Path(path)
     size = path.stat().st_size
     if size < TRAILER.size:
-        return size, None
+        return size, None, False
     with open(path, "rb") as f:
         f.seek(size - TRAILER.size)
         length, crc, magic = TRAILER.unpack(f.read(TRAILER.size))
-        if magic != MAGIC or length > size - TRAILER.size:
-            return size, None
+        if magic != MAGIC:
+            return size, None, False
+        if length > size - TRAILER.size:
+            return size, None, True
         base = size - TRAILER.size - length
         f.seek(base)
         payload = f.read(length)
@@ -63,12 +66,20 @@ def read_embedded(path) -> tuple[int, dict | None]:
         # хвост повреждён, и поле длины тоже может быть испорчено — тогда «программа без
         # хвоста» оказалась бы обрезанной. Безопаснее считать программой весь файл: новый
         # хвост ляжет после старого, а загрузчик PyInstaller найдёт свой архив как и раньше
-        return size, None
+        return size, None, True
     try:
         doc = json.loads(zlib.decompress(payload).decode("utf-8"))
     except (zlib.error, ValueError):
-        return size, None
-    return base, doc if isinstance(doc, dict) else None
+        return size, None, True
+    if not isinstance(doc, dict):
+        return size, None, True
+    return base, doc, False
+
+
+def read_embedded(path) -> tuple[int, dict | None]:
+    """(длина EXE без хвоста, данные из хвоста или None)."""
+    base, doc, _ = inspect_embedded(path)
+    return base, doc
 
 
 def write_exe_with_data(src, dst, doc: dict) -> None:
@@ -180,7 +191,9 @@ class EmbeddedStore:
         self.notices: list[str] = []          # что показать пользователю после запуска
         self._doc: dict = {"rev": 0, "settings": {}, "tasks": {}}
         self._base_gen: str | None = None     # поколение данных, лежащих сейчас в EXE
+        self._pending_gen: str | None = None  # поколение, записанное в скачанное обновление
         self._embedded_rev: int = 0
+        self._work_blocked = False            # рабочую копию нельзя перезаписывать (см. _set_aside)
         self._load()
 
     # ---- загрузка
@@ -200,27 +213,53 @@ class EmbeddedStore:
     def _set_aside(self, tag: str, message: str) -> None:
         """Отложить рабочую копию в отдельный файл (не удалять — там могут быть данные)."""
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}.json"
+        target = self.work_dir / f"work-{self._key}-{tag}-{stamp}-{uuid.uuid4().hex[:6]}.json"
         try:
             os.replace(self.work_file.path, target)
-            self.notices.append(f"{message}: {target}")
-        except OSError as e:
-            self.notices.append(f"{message}, но отложить её не удалось: {e}")
+        except OSError:
+            try:
+                shutil.copy2(self.work_file.path, target)   # переименовать не дали — хотя бы копия
+            except OSError as e:
+                # и скопировать не вышло: тогда рабочую копию не трогаем вовсе, чтобы первое же
+                # сохранение не затёрло эти данные (изменения этой сессии живут до выхода)
+                self._work_blocked = True
+                self.notices.append(f"{message}, но отложить её не удалось ({e}); файл оставлен: "
+                                    f"{self.work_file.path}")
+                return
+        self.notices.append(f"{message}: {target}")
 
     def _load(self) -> None:
         try:
-            _, embedded = read_embedded(self.exe)
+            _, embedded, damaged = inspect_embedded(self.exe)
         except OSError:
-            embedded = None
+            embedded, damaged = None, False
         e_gen = embedded.get("gen") if embedded else None
         e_rev = _as_int(embedded.get("rev")) if embedded else 0
         work = self._read_work()
 
+        if work is not None and embedded is not None and \
+                _section(work, "settings") == _section(embedded, "settings") and \
+                _section(work, "tasks") == _section(embedded, "tasks"):
+            # в рабочей копии то же, что в программе (например, её не дал удалить антивирус) —
+            # ни восстанавливать, ни откладывать нечего
+            self._drop_work()
+            work = None
+
         doc = None
-        if work is not None:
-            if work.get("base_gen") == e_gen:
-                # продолжение тех же данных: рабочая копия новее, только если прошлый
-                # выход не успел записать их в EXE (сбой, выключение, нет прав)
+        if damaged:
+            if work is not None:
+                doc = work
+                self.notices.append("Данные внутри программы повреждены — восстановлены из рабочей "
+                                    "копии на этом компьютере")
+            else:
+                self.notices.append("Данные внутри программы повреждены и не прочитаны — список начат "
+                                    "заново. Если у вас есть экспорт, его можно импортировать")
+        elif work is not None:
+            pending = work.get("pending_gen")
+            if work.get("base_gen") == e_gen or (pending and pending == e_gen):
+                # продолжение тех же данных (в т.ч. после установки обновления, куда они были
+                # перенесены): рабочая копия новее, только если прошлый выход не успел
+                # записать их в EXE (сбой, выключение, нет прав, не установилось обновление)
                 if embedded is None or work["rev"] > e_rev:
                     doc = work
                     self.notices.append("Восстановлены изменения, которые не успели записаться "
@@ -290,9 +329,14 @@ class EmbeddedStore:
         self._doc["rev"] += 1
         self._write_work()
 
+    def _work_payload(self) -> dict:
+        return dict(self._doc, base_gen=self._base_gen, pending_gen=self._pending_gen)
+
     def _write_work(self) -> None:
+        if self._work_blocked:
+            return
         try:
-            self.work_file.save(dict(self._doc, base_gen=self._base_gen))
+            self.work_file.save(self._work_payload())
         except OSError as e:
             self.last_error = f"рабочая копия: {e}"
 
@@ -333,6 +377,7 @@ class EmbeddedStore:
             self.last_error = f"запись в программу: {e}"
             return False
         self._base_gen = gen
+        self._pending_gen = None
         self._embedded_rev = self._doc["rev"]
         self._drop_work()
         self._drop_legacy()
@@ -341,18 +386,30 @@ class EmbeddedStore:
 
     def embed_into(self, path) -> None:
         """Перенести текущие данные в другой EXE (скачанное обновление) — чтобы после
-        подмены программы дела и настройки не потерялись."""
+        подмены программы дела и настройки не потерялись.
+
+        Состояние текущего EXE не меняется: обновление ещё может не установиться, и тогда
+        при выходе данные должны записаться в прежний EXE как обычно. Рабочая копия лишь
+        запоминает поколение обновления (pending_gen) — после установки новая версия
+        узнает в ней продолжение своих данных и не примет её за чужую."""
         path = Path(path)
         gen = uuid.uuid4().hex
         tmp = path.with_name(path.name + EMBED_SUFFIX)
         write_exe_with_data(path, tmp, self._embedded_doc(gen))
         os.replace(tmp, path)
-        # новая версия будет содержать поколение gen — рабочая копия продолжает именно его
-        self._base_gen = gen
-        self._embedded_rev = self._doc["rev"]
-        self._write_work()
+        self._pending_gen = gen
+        if self._work_blocked:
+            return
+        try:
+            self.work_file.save(self._work_payload())
+        except OSError:
+            # не записалась — лучше убрать устаревшую копию, чем получить ложный «конфликт»
+            # после установки; если не убрать и её, обновление не продолжаем
+            self.work_file.path.unlink(missing_ok=True)
 
     def _drop_work(self) -> None:
+        if self._work_blocked:
+            return      # там данные, которые не удалось отложить, — не удалять
         _unlink_quietly(self.work_file.path)
 
     def _drop_legacy(self) -> None:
