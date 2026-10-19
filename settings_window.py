@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from reminder_window import MAX_TOTAL_COLUMNS
 from settings import Settings
-from theme import build_stylesheet
+from theme import build_stylesheet, fix_spin_inset
 from update_manager import CHECK_INTERVAL_CHOICES, DEFAULT_CHECK_HOURS
 
 UPDATE_INTERVAL_NAMES = {1: "раз в час", 3: "раз в 3 часа", 6: "раз в 6 часов",
@@ -289,6 +289,9 @@ class SettingsDialog(QDialog):
         footer.addWidget(hint)
         outer.addLayout(footer)
 
+        # Qt 6.12 потерял отступ текста в счётчиках — возвращаем (см. theme.SpinInsetFilter)
+        for spin in self.findChildren(QSpinBox):
+            fix_spin_inset(spin)
         self._fit_to_screen()
 
     # ------------------------------------------------------------------ helpers

@@ -8,7 +8,7 @@ import tempfile
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QStyle, QStyleOptionSpinBox, QWidget
 
 LIGHT = {
     "window_bg": "#F3F6FB",
@@ -348,6 +348,44 @@ class TitlebarFilter(QObject):
         if event.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow():
             set_dark_titlebar(obj, ACTIVE_THEME == "dark")
         return False
+
+
+# Отступ текста от края счётчика по таблице стилей: рамка 1 px + padding 6 px.
+SPIN_TEXT_INSET = 7
+
+
+class SpinInsetFilter(QObject):
+    """Возвращает отступ текста в QSpinBox, который пропал в Qt 6.12.
+
+    В Qt 6.12 поле ввода внутри QSpinBox с таблицей стилей встаёт вплотную к левому краю
+    (padding и рамка не учитываются), и цифры налезают на рамку. Добираем недостающее
+    полями текста; на Qt, где отступ на месте, ничего не меняется.
+    """
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.Polish, QEvent.StyleChange, QEvent.Show):
+            _apply_spin_inset(obj)
+        return False
+
+
+_spin_inset_filter: SpinInsetFilter | None = None
+
+
+def _apply_spin_inset(spin) -> None:
+    rect = spin.style().subControlRect(
+        QStyle.CC_SpinBox, QStyleOptionSpinBox(), QStyle.SC_SpinBoxEditField, spin
+    )
+    pad = max(0, SPIN_TEXT_INSET - rect.left())
+    spin.lineEdit().setTextMargins(pad, 0, pad, 0)
+
+
+def fix_spin_inset(spin) -> None:
+    """Подключает к счётчику исправление отступа (см. SpinInsetFilter)."""
+    global _spin_inset_filter
+    if _spin_inset_filter is None:
+        _spin_inset_filter = SpinInsetFilter()
+    spin.installEventFilter(_spin_inset_filter)
+    _apply_spin_inset(spin)
 
 
 def theme_icon(current_theme: str) -> QIcon:

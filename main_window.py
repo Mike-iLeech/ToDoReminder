@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from drag_manager import TaskListWidget
 from import_export import apply_import, export_tasks, load_tasks
 from models import TaskLimitError, TaskStatus, TaskStore, next_status, prev_status, status_color
-from theme import DARK, LIGHT, apply_titlebars, build_stylesheet, clear_icon, theme_icon
+from theme import DARK, LIGHT, apply_titlebars, build_stylesheet, clear_icon, fix_spin_inset, theme_icon
 from version import APP_NAME, APP_RELEASE_DATE, APP_VERSION
 
 EXPORT_FILTERS = [
@@ -266,6 +266,7 @@ class MainWindow(QWidget):
         self.interval_spin.setAlignment(Qt.AlignCenter)
         self.interval_spin.setSuffix(" мин")
         self.interval_spin.setFixedSize(96, 30)
+        fix_spin_inset(self.interval_spin)
         self.interval_spin.setValue(max(1, self._ctx.settings_manager.s.reminder_interval_seconds // 60))
         self.interval_spin.valueChanged.connect(self._on_interval_changed)
         interval_row.addStretch(1)
