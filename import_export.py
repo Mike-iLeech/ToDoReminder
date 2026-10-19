@@ -68,6 +68,9 @@ def load_tasks(path: Path, fmt: str) -> List[Tuple[str, Optional[TaskStatus], bo
     elif fmt == "json":
         data = json.loads(path.read_text(encoding="utf-8"))
         tasks = data.get("tasks", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if isinstance(tasks, dict):
+            # рабочая/запасная копия данных программы: {"rev", "settings", "tasks": {"tasks": [...]}}
+            tasks = tasks.get("tasks", [])
         if isinstance(tasks, list):
             for item in tasks:
                 if not isinstance(item, dict):

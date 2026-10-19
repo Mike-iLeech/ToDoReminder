@@ -22,8 +22,20 @@ from theme import build_stylesheet
 from version import APP_VERSION
 
 FIRST_CHECK_DELAY_MS = 20_000              # после запуска — не мешать старту
-PERIODIC_CHECK_MS = 6 * 60 * 60 * 1000     # приложение живёт в трее неделями
+CHECK_INTERVAL_CHOICES = (1, 3, 6, 12, 24)  # часы — варианты в настройках
+DEFAULT_CHECK_HOURS = 6
+RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000    # нет сети (например, сразу после автозапуска) — не ждать часами
 CLEANUP_RETRY_MS = 3_000
+
+
+def check_interval_ms(hours) -> int:
+    try:
+        hours = int(hours)
+    except (TypeError, ValueError):
+        hours = DEFAULT_CHECK_HOURS
+    if hours not in CHECK_INTERVAL_CHOICES:
+        hours = DEFAULT_CHECK_HOURS
+    return hours * 60 * 60 * 1000
 
 
 def _safe_emit(signal, *args) -> None:
@@ -68,8 +80,13 @@ class UpdateManager(QObject):
         self._first.setInterval(FIRST_CHECK_DELAY_MS)
         self._first.timeout.connect(self._auto_check)
         self._periodic = QTimer(self)
-        self._periodic.setInterval(PERIODIC_CHECK_MS)
+        self._periodic.setInterval(check_interval_ms(ctx.settings_manager.s.update_check_hours))
         self._periodic.timeout.connect(self._auto_check)
+        self._retry = QTimer(self)
+        self._retry.setSingleShot(True)
+        self._retry.setInterval(RETRY_AFTER_FAILURE_MS)
+        self._retry.timeout.connect(self._auto_check)
+        ctx.settings_manager.changed.connect(self._on_settings_changed)
         self._cleanup_tries = 0
         self._cleanup = QTimer(self)
         self._cleanup.setInterval(CLEANUP_RETRY_MS)
@@ -87,8 +104,17 @@ class UpdateManager(QObject):
         self._closing = True
         self._first.stop()
         self._periodic.stop()
+        self._retry.stop()
         self._cleanup.stop()
         self._cancel.set()
+
+    def _on_settings_changed(self) -> None:
+        """Сменили интервал в настройках — отсчёт начинается заново с новым интервалом."""
+        wanted = check_interval_ms(self._ctx.settings_manager.s.update_check_hours)
+        if wanted != self._periodic.interval():
+            self._periodic.setInterval(wanted)
+            if self._periodic.isActive():
+                self._periodic.start()
 
     @property
     def blocks_reminders(self) -> bool:
@@ -139,7 +165,13 @@ class UpdateManager(QObject):
     def _on_check_failed(self, message: str, silent: bool) -> None:
         self._checking = False
         silent = silent and not self._manual_pending
-        if not silent and not self._downloading and not self._closing:
+        if self._closing:
+            return
+        if silent:
+            # тихая проверка не удалась (нет сети, лимит GitHub) — повторить скоро,
+            # а не через весь интервал
+            self._retry.start()
+        elif not self._downloading:
             self._message(QMessageBox.Warning, message)
 
     def _on_checked(self, info, silent: bool) -> None:
@@ -332,6 +364,15 @@ class UpdateManager(QObject):
         if mw is None or not mw.isVisible():
             args.append("--hide")
         self._ctx.save_all()
+        try:
+            # настройки и дела хранятся внутри EXE — переносим их в новую версию до подмены
+            self._ctx.data_store.embed_into(path)
+        except OSError as e:
+            updater.discard(path)
+            self._message(QMessageBox.Critical,
+                          f"Не удалось перенести данные в новую версию: {e}\nПрограмма продолжит работу в текущей версии.",
+                          "Обновление")
+            return
         try:
             updater.install_and_restart(path, args)
         except OSError as e:

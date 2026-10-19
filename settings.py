@@ -9,8 +9,11 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from autostart import autostart_command, build_command, is_autostart_enabled, set_autostart
 from storage import JsonFile
 
-if getattr(sys, "frozen", False):
-    # в собранном EXE данные хранятся рядом с исполняемым файлом
+FROZEN = bool(getattr(sys, "frozen", False))
+
+# Папка data: при запуске из исходников — рабочее хранилище; у собранного EXE — только
+# источник для однократного переноса данных старых версий внутрь EXE (см. datastore.py).
+if FROZEN:
     BASE_DIR = Path(sys.executable).resolve().parent
 else:
     BASE_DIR = Path(__file__).resolve().parent
@@ -18,6 +21,45 @@ else:
 DATA_DIR = BASE_DIR / "data"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 TASKS_PATH = DATA_DIR / "tasks.json"
+
+
+class FolderStore:
+    """Хранилище запуска из исходников: JSON-файлы в папке data (пути читаются при каждом
+    обращении — тесты подменяют их на временные)."""
+
+    def load_settings(self) -> dict:
+        return JsonFile(SETTINGS_PATH).load({})
+
+    def save_settings(self, data: dict) -> None:
+        JsonFile(SETTINGS_PATH).save(data)
+
+    def load_tasks(self) -> dict:
+        return JsonFile(TASKS_PATH).load({})
+
+    def save_tasks(self, data: dict) -> None:
+        JsonFile(TASKS_PATH).save(data)
+
+    def finalize(self) -> bool:
+        return True
+
+    def embed_into(self, path) -> None:
+        pass
+
+
+_STORE = None
+
+
+def get_store():
+    """Одно хранилище на процесс: в собранном EXE — данные внутри EXE, иначе — папка data."""
+    global _STORE
+    if _STORE is None:
+        if FROZEN:
+            from datastore import EmbeddedStore
+
+            _STORE = EmbeddedStore(Path(sys.executable).resolve(), legacy_dir=DATA_DIR)
+        else:
+            _STORE = FolderStore()
+    return _STORE
 
 
 @dataclass
@@ -51,6 +93,7 @@ class Settings:
     fullscreen_columns_done: int = 2            # число колонок для задач Done в полноэкранном уведомлении
     auto_remove_done: bool = True               # удалять Done в начале нового дня и при запуске
     auto_update_check: bool = True              # проверять обновления на GitHub автоматически
+    update_check_hours: int = 6                 # как часто проверять: 1, 3, 6, 12 или 24 часа
     update_skip_version: str = ""               # версия, которую пользователь попросил не предлагать
 
 
@@ -76,7 +119,7 @@ class SettingsManager(QObject):
         self._save_timer.timeout.connect(self.flush)
 
     def _load(self) -> Settings:
-        data = JsonFile(SETTINGS_PATH).load({})
+        data = get_store().load_settings()
         if not isinstance(data, dict):
             data = {}
         result = Settings()
@@ -114,7 +157,7 @@ class SettingsManager(QObject):
         self._save_timer.stop()
         if self._closed:
             return
-        JsonFile(SETTINGS_PATH).save(asdict(self.s))
+        get_store().save_settings(asdict(self.s))
         # реестр трогаем только при расхождении (в т.ч. если EXE переехал в другую папку)
         wanted = build_command() if self.s.autostart else None
         if autostart_command() != wanted:
