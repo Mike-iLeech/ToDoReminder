@@ -43,7 +43,9 @@ class SystemTray(QSystemTrayIcon):
         act_open.triggered.connect(ctx.open_main_window)
         act_move.triggered.connect(ctx.move_to_primary_screen)
         act_update.triggered.connect(ctx.check_updates)
-        act_quit.triggered.connect(ctx.quit)
+        # не connect(ctx.quit): triggered передаёт checked=False, и он попадал бы в параметр
+        # save — выход из трея шёл как «перезапуск после обновления», без записи данных в EXE
+        act_quit.triggered.connect(lambda: ctx.quit())
 
         self.setContextMenu(menu)
         self.activated.connect(self._on_activated)

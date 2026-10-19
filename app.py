@@ -274,7 +274,7 @@ class AppContext:
         if self.show_list_win is win:
             self.show_list_win = None
 
-    def quit(self, save: bool = True) -> None:
+    def quit(self, *, save: bool = True) -> None:
         """save=False — всё уже записано (перезапуск после обновления): новая версия
         к этому моменту может держать файлы данных, повторно их не трогаем."""
         if self.main_window is not None:
